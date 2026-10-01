@@ -1,0 +1,27 @@
+# --- Secrets (never commit) ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# --- Vercel ---
+.vercel
+
+# --- Python ---
+backend/.venv/
+__pycache__/
+*.pyc
+*.db
+backend/instance/
+
+# --- Node ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# --- Editors / OS ---
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

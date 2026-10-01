@@ -1,0 +1,10 @@
+Flask==3.1.2
+Flask-CORS==6.0.1
+Flask-SQLAlchemy==3.1.1
+python-dotenv==1.1.1
+APScheduler==3.11.0
+Werkzeug==3.1.3
+# Postgres driver for hosted databases (Neon, Supabase, Vercel Postgres).
+# Local development on SQLite does not need it, but it must be present in the
+# Vercel build for a hosted DATABASE_URL to connect.
+psycopg[binary]==3.3.6

@@ -1,0 +1,15 @@
+# Vercel ignores these when uploading the project.
+# Keeping them out of the upload makes builds faster and avoids shipping
+# local secrets or virtualenvs into the function bundle.
+backend/.venv/
+backend/instance/
+backend/.env
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+.vercel/
+.git/
+start_office.bat
+README.md
