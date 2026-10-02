@@ -6,7 +6,7 @@ import {
   Plus, Search, Settings2, Sparkles, Users, X, Zap,
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
   Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks,
-  ShieldCheck, RefreshCw, GitCompare
+  ShieldCheck, RefreshCw, GitCompare, Download, ShieldAlert
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -461,6 +461,12 @@ function App() {
             <ShieldCheck size={16} /> Site QA
           </button>
           <button
+            className={`view-tab ${activeView === "security" ? "active" : ""}`}
+            onClick={() => setActiveView("security")}
+          >
+            <ShieldAlert size={16} /> Security
+          </button>
+          <button
             className={`view-tab completed-tab ${activeView === "completed" ? "active" : ""}`}
             onClick={() => setActiveView("completed")}
           >
@@ -471,7 +477,12 @@ function App() {
 
         {/* VIEW: SITE QA BOT */}
         {activeView === "qa" && (
-          <SiteQaView />
+          <SiteQaView onToast={showToast} onAuthLoss={handleAuthLoss} />
+        )}
+
+        {/* VIEW: SECURITY ANALYST */}
+        {activeView === "security" && (
+          <SecurityView onToast={showToast} onAuthLoss={handleAuthLoss} />
         )}
 
         {/* VIEW: ALL TASKS REGISTER */}
@@ -1023,6 +1034,16 @@ function Sidebar({
         }}
       >
         <ShieldCheck size={18} /> Site QA
+      </button>
+
+      <button
+        className={`nav-item ${activeView === "security" ? "active" : ""}`}
+        onClick={() => {
+          setActiveView("security");
+          setSelectedMember("all");
+        }}
+      >
+        <ShieldAlert size={18} /> Security Analyst
       </button>
 
       <button
@@ -1679,7 +1700,7 @@ const STATUS_META = {
 
 const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 
-function SiteQaView({ onRunCheck }) {
+function SiteQaView({ onToast, onAuthLoss }) {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1693,8 +1714,8 @@ function SiteQaView({ onRunCheck }) {
       setStatus(s);
       setHistory(h.runs || []);
     } catch (e) {
-      if (e.authRequired) return handleAuthLoss();
-      showToast(e.message);
+      if (e.authRequired) return onAuthLoss();
+      onToast(e.message);
     } finally {
       setLoading(false);
     }
@@ -1709,10 +1730,10 @@ function SiteQaView({ onRunCheck }) {
       setRunning(true);
       await api("/api/qa/check", { method: "POST" });
       await load();
-      showToast("QA check finished");
+      onToast("QA check finished");
     } catch (e) {
-      if (e.authRequired) return handleAuthLoss();
-      showToast(e.message);
+      if (e.authRequired) return onAuthLoss();
+      onToast(e.message);
     } finally {
       setRunning(false);
     }
@@ -1749,6 +1770,11 @@ function SiteQaView({ onRunCheck }) {
           <a className="secondary-btn" href={siteUrl} target="_blank" rel="noreferrer">
             <ExternalLink size={15} /> Open Site
           </a>
+          {run && (
+            <a className="secondary-btn" href={`${API}/api/qa/report.pdf`}>
+              <Download size={15} /> Export PDF
+            </a>
+          )}
           <button className="primary-btn" onClick={runNow} disabled={running}>
             <RefreshCw size={15} className={running ? "spin" : ""} />
             {running ? "Checking..." : "Run Check Now"}
@@ -1770,6 +1796,7 @@ function SiteQaView({ onRunCheck }) {
                 {run.status === "healthy" && "Healthy"}
                 {run.status === "warning" && "Warnings"}
                 {run.status === "critical" && "Critical"}
+                {run.status === "inconclusive" && "Scan Incomplete"}
               </span>
               <h3>{run.summary}</h3>
               <div className="qa-hero-meta">
@@ -1912,6 +1939,232 @@ function SiteQaView({ onRunCheck }) {
                       {h.critical_count} critical / {h.warning_count} warnings
                     </span>
                   </td>
+                  <td><span className={`trigger-tag ${h.trigger}`}>{h.trigger}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SecurityView({ onToast, onAuthLoss }) {
+  const [status, setStatus] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+
+  async function load() {
+    try {
+      setLoading(true);
+      const [s, h] = await Promise.all([
+        api("/api/security/status"),
+        api("/api/security/history"),
+      ]);
+      setStatus(s);
+      setHistory(h.runs || []);
+    } catch (e) {
+      if (e.authRequired) return onAuthLoss();
+      onToast(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function runNow() {
+    try {
+      setRunning(true);
+      await api("/api/security/check", { method: "POST" });
+      await load();
+      onToast("Security review finished");
+    } catch (e) {
+      if (e.authRequired) return onAuthLoss();
+      onToast(e.message);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="qa-loading">
+        <div className="loader" />
+        <p>Loading security review...</p>
+      </div>
+    );
+  }
+
+  const run = status?.run;
+  const siteUrl = status?.site_url || "https://ngocore.in";
+  const findings = run?.findings || [];
+  const tls = run?.tls || {};
+
+  return (
+    <section className="qa-view">
+      <div className="section-head">
+        <div>
+          <div className="eyebrow">SECURITY ANALYST</div>
+          <h2>Security Review</h2>
+          <p>
+            A read-only audit of {siteUrl}: TLS certificate, response headers,
+            cookies, CORS, information disclosure and any accidentally public
+            files. It never logs in or attacks anything.
+          </p>
+        </div>
+        <div className="workspace-actions">
+          <a className="secondary-btn" href={siteUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={15} /> Open Site
+          </a>
+          {run && (
+            <a className="secondary-btn" href={`${API}/api/security/report.pdf`}>
+              <Download size={15} /> Export PDF
+            </a>
+          )}
+          <button className="primary-btn" onClick={runNow} disabled={running}>
+            <RefreshCw size={15} className={running ? "spin" : ""} />
+            {running ? "Reviewing..." : "Run Review Now"}
+          </button>
+        </div>
+      </div>
+
+      {!run ? (
+        <div className="qa-empty">
+          <ShieldCheck size={34} />
+          <h3>No review has run yet</h3>
+          <p>Press Run Review Now to audit the site, or wait for the daily scheduled run.</p>
+        </div>
+      ) : (
+        <>
+          <div className={`qa-hero ${run.status}`}>
+            <div className="qa-hero-left">
+              <span className={`qa-status-pill ${run.status}`}>
+                {run.status === "healthy" && "Secure"}
+                {run.status === "warning" && "Improvements"}
+                {run.status === "critical" && "Action Needed"}
+                {run.status === "inconclusive" && "Scan Incomplete"}
+              </span>
+              <h3>{run.summary}</h3>
+              <div className="qa-hero-meta">
+                <span>Checked {new Date(run.checked_at).toLocaleString()}</span>
+                <span className="dot-sep">&bull;</span>
+                <span className={`trigger-tag ${run.trigger}`}>
+                  {run.trigger === "manual" ? "Run by you" : "Scheduled"}
+                </span>
+              </div>
+            </div>
+            <div className="qa-hero-stats">
+              <div className="qa-stat">
+                <span className="qa-stat-val danger">{run.critical_count}</span>
+                <span className="qa-stat-lbl">Critical</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val warn">{run.warning_count}</span>
+                <span className="qa-stat-lbl">Warnings</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val">{run.info_count}</span>
+                <span className="qa-stat-lbl">Advisory</span>
+              </div>
+              <div className="qa-stat">
+                <span className={`qa-stat-val ${tls.valid ? "good" : "danger"}`}>
+                  {tls.valid ? tls.tls_version || "OK" : "BAD"}
+                </span>
+                <span className="qa-stat-lbl">TLS</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="qa-columns">
+            <div className="qa-panel">
+              <div className="qa-panel-head"><h4>TLS Certificate</h4></div>
+              <table className="qa-table">
+                <tbody>
+                  <tr><td>Valid</td><td>{tls.valid ? "Yes" : "No"}</td></tr>
+                  <tr><td>Protocol</td><td>{tls.tls_version || "-"}</td></tr>
+                  <tr><td>Issuer</td><td>{tls.issuer || "-"}</td></tr>
+                  <tr>
+                    <td>Expires</td>
+                    <td>
+                      {tls.expires ? String(tls.expires).slice(0, 10) : "-"}
+                      {tls.days_left != null && (
+                        <span className={tls.days_left < 30 ? " slow" : ""}>
+                          {" "}({tls.days_left} days)
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="qa-panel">
+              <div className="qa-panel-head">
+                <h4>Sensitive Files ({run.paths_checked?.length || 0})</h4>
+              </div>
+              <table className="qa-table">
+                <thead>
+                  <tr><th>Path</th><th>Status</th><th>Result</th></tr>
+                </thead>
+                <tbody>
+                  {(run.paths_checked || []).map(p => (
+                    <tr key={p.path}>
+                      <td>{p.path}</td>
+                      <td><span className={`qa-code ${p.status === 200 ? "bad" : "ok"}`}>{p.status}</span></td>
+                      <td>
+                        {p.exposed
+                          ? <span className="qa-code bad">EXPOSED</span>
+                          : <span className="qa-code ok">Protected</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="qa-panel">
+            <div className="qa-panel-head">
+              <h4>Findings ({findings.length})</h4>
+            </div>
+            {findings.length === 0 ? (
+              <div className="qa-no-issues">
+                <CheckCircle2 size={16} /> No security problems found.
+              </div>
+            ) : (
+              <div className="qa-issues">
+                {findings.map((f, i) => (
+                  <div key={i} className={`qa-issue ${f.severity}`}>
+                    <span className="qa-sev">{f.severity}</span>
+                    <span className="qa-cat">{f.category}</span>
+                    <span className="qa-msg">{f.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {history.length > 1 && (
+        <div className="qa-panel">
+          <div className="qa-panel-head"><h4>Review History</h4></div>
+          <table className="qa-table">
+            <thead>
+              <tr><th>When</th><th>Grade</th><th>Critical</th><th>Warnings</th><th>Trigger</th></tr>
+            </thead>
+            <tbody>
+              {history.map(h => (
+                <tr key={h.id}>
+                  <td>{new Date(h.checked_at).toLocaleString()}</td>
+                  <td><span className={`qa-status-pill sm ${h.status}`}>{h.status}</span></td>
+                  <td className={h.critical_count ? "bad-text" : ""}>{h.critical_count}</td>
+                  <td>{h.warning_count}</td>
                   <td><span className={`trigger-tag ${h.trigger}`}>{h.trigger}</span></td>
                 </tr>
               ))}

@@ -2540,6 +2540,8 @@ button { cursor: pointer; color: inherit; }
 .qa-hero.healthy { border-left-color: #50d890; }
 .qa-hero.warning { border-left-color: var(--gold); }
 .qa-hero.critical { border-left-color: #f87171; }
+.qa-hero.inconclusive { border-left-color: #8fa5bc; }
+.qa-status-pill.inconclusive { color: #c2d2e1; background: #1c2740; }
 .qa-hero-left { flex: 1; min-width: 280px; }
 .qa-hero-left h3 { margin: 10px 0 8px; font: 600 15px "Space Grotesk"; color: var(--text); }
 .qa-hero-meta { display: flex; gap: 9px; align-items: center; font-size: 10px; color: var(--muted-dark); }

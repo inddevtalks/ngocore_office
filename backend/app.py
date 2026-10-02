@@ -1,11 +1,12 @@
 import os
 import sys
 import hmac
+import io
 import json
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory, session
+from flask import Flask, jsonify, request, send_from_directory, session, send_file
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
@@ -178,6 +179,63 @@ class QaRun(db.Model):
             return []
 
 
+class SecurityRun(db.Model):
+    """One automated security review of the client site."""
+    id = db.Column(db.Integer, primary_key=True)
+    site_url = db.Column(db.String(300), nullable=False)
+    status = db.Column(db.String(20), default="healthy")  # healthy, warning, critical
+    summary = db.Column(db.Text, default="")
+    findings = db.Column(db.Text, default="[]")     # JSON list
+    tls = db.Column(db.Text, default="{}")          # JSON object
+    paths_checked = db.Column(db.Text, default="[]")  # JSON list
+    security_txt = db.Column(db.Boolean, default=False)
+    homepage_status = db.Column(db.Integer, default=0)
+    critical_count = db.Column(db.Integer, default=0)
+    warning_count = db.Column(db.Integer, default=0)
+    info_count = db.Column(db.Integer, default=0)
+    checked_at = db.Column(db.DateTime, default=datetime.utcnow)
+    trigger = db.Column(db.String(20), default="manual")
+
+    def to_dict(self, include_detail=True):
+        data = {
+            "id": self.id,
+            "site_url": self.site_url,
+            "status": self.status,
+            "summary": self.summary,
+            "critical_count": self.critical_count or 0,
+            "warning_count": self.warning_count or 0,
+            "info_count": self.info_count or 0,
+            "finding_count": len(self._json(self.findings)),
+            "security_txt": bool(self.security_txt),
+            "homepage_status": self.homepage_status,
+            "checked_at": self.checked_at.isoformat() if self.checked_at else None,
+            "trigger": self.trigger,
+        }
+        if include_detail:
+            data.update({
+                "findings": self._json(self.findings),
+                "tls": self._json_object(self.tls),
+                "paths_checked": self._json(self.paths_checked),
+            })
+        return data
+
+    @staticmethod
+    def _json(raw):
+        try:
+            value = json.loads(raw or "[]")
+            return value if isinstance(value, list) else []
+        except (ValueError, TypeError):
+            return []
+
+    @staticmethod
+    def _json_object(raw):
+        try:
+            value = json.loads(raw or "{}")
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+
 class Task(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(240), nullable=False)
@@ -234,6 +292,8 @@ from emailer import (
 )
 
 import qa_bot
+import security_bot
+import report_pdf
 
 
 DEFAULT_QA_SITE = os.getenv("QA_SITE_URL", "https://ngocore.in").rstrip("/")
@@ -256,6 +316,34 @@ def _store_qa_run(report, trigger):
         content_added=json.dumps(report["content_added"]),
         content_removed=json.dumps(report["content_removed"]),
         content_fingerprint=report.get("content_fingerprint"),
+        trigger=trigger,
+    )
+    db.session.add(run)
+    db.session.commit()
+    return run
+
+
+def _latest_security_run():
+    return SecurityRun.query.order_by(
+        SecurityRun.checked_at.desc(), SecurityRun.id.desc()
+    ).first()
+
+
+def _run_and_store_security_check(trigger):
+    """Runs the passive security review and records it."""
+    report = security_bot.run_security_check(DEFAULT_QA_SITE)
+    run = SecurityRun(
+        site_url=DEFAULT_QA_SITE,
+        status=report["status"],
+        summary=report["summary"],
+        findings=json.dumps(report["findings"]),
+        tls=json.dumps(report["tls"] or {}),
+        paths_checked=json.dumps(report["paths_checked"]),
+        security_txt=report["security_txt"],
+        homepage_status=report["homepage_status"],
+        critical_count=report["critical_count"],
+        warning_count=report["warning_count"],
+        info_count=report["info_count"],
         trigger=trigger,
     )
     db.session.add(run)
@@ -287,6 +375,7 @@ def _run_and_store_qa_check(trigger):
         report["status"], report["issues"], report["pages"], report["assets"],
         {"added": report["content_added"], "removed": report["content_removed"]}
         if changed else None,
+        blocked=report.get("scan_blocked", False),
     )
     return _store_qa_run(report, trigger)
 
@@ -903,6 +992,30 @@ def cron_qa_check():
     })
 
 
+@app.get("/api/cron/security-check")
+def cron_security_check():
+    """Scheduled security review. Same CRON_SECRET protection as the other crons."""
+    expected = os.getenv("CRON_SECRET", "").strip()
+    if expected:
+        provided = request.headers.get("Authorization", "").strip()
+        if provided != f"Bearer {expected}":
+            return jsonify({"error": "Unauthorized."}), 401
+    elif not request.args.get("open"):
+        return jsonify({
+            "error": "CRON_SECRET is not set. Add it as a Vercel environment variable to protect this endpoint."
+        }), 503
+
+    run = _run_and_store_security_check("scheduled")
+    return jsonify({
+        "ok": True,
+        "message": f"Security review complete for {run.site_url}: {run.status}",
+        "status": run.status,
+        "summary": run.summary,
+        "critical": run.critical_count,
+        "warnings": run.warning_count,
+    })
+
+
 @app.get("/api/cron/daily-emails")
 def cron_daily_emails():
     """
@@ -966,6 +1079,90 @@ def qa_history():
 def qa_run_detail(run_id):
     run = db.get_or_404(QaRun, run_id)
     return jsonify(run.to_dict())
+
+
+@app.get("/api/qa/report.pdf")
+@require_admin
+def qa_report_pdf():
+    """Downloads the latest QA result as a PDF."""
+    run = _latest_qa_run()
+    if not run:
+        return jsonify({"error": "No QA check has run yet. Press Run Check Now first."}), 404
+
+    try:
+        pdf_bytes = report_pdf.build_qa_pdf(run.to_dict(), run.site_url)
+    except Exception as e:
+        print(f"[QA PDF ERROR] {e}")
+        return jsonify({"error": f"Could not build the PDF: {e}"}), 500
+
+    stamp = (run.checked_at or datetime.utcnow()).strftime("%Y-%m-%d")
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"qa-report-{stamp}.pdf",
+    )
+
+
+# ---------------- Security Analyst Endpoints ----------------
+
+@app.get("/api/security/status")
+@require_admin
+def security_status():
+    run = _latest_security_run()
+    if not run:
+        return jsonify({
+            "has_run": False,
+            "site_url": DEFAULT_QA_SITE,
+            "message": "No security review has run yet. Press Run Review Now.",
+        })
+    return jsonify({
+        "has_run": True,
+        "site_url": DEFAULT_QA_SITE,
+        "run": run.to_dict(),
+    })
+
+
+@app.post("/api/security/check")
+@require_admin
+def security_check():
+    run = _run_and_store_security_check("manual")
+    return jsonify({"has_run": True, "site_url": DEFAULT_QA_SITE, "run": run.to_dict()})
+
+
+@app.get("/api/security/history")
+@require_admin
+def security_history():
+    runs = SecurityRun.query.order_by(
+        SecurityRun.checked_at.desc(), SecurityRun.id.desc()
+    ).limit(30).all()
+    return jsonify({
+        "site_url": DEFAULT_QA_SITE,
+        "runs": [r.to_dict(include_detail=False) for r in runs],
+    })
+
+
+@app.get("/api/security/report.pdf")
+@require_admin
+def security_report_pdf():
+    """Downloads the latest security review as a PDF."""
+    run = _latest_security_run()
+    if not run:
+        return jsonify({"error": "No security review has run yet. Run one first."}), 404
+
+    try:
+        pdf_bytes = report_pdf.build_security_pdf(run.to_dict(), run.site_url)
+    except Exception as e:
+        print(f"[SECURITY PDF ERROR] {e}")
+        return jsonify({"error": f"Could not build the PDF: {e}"}), 500
+
+    stamp = (run.checked_at or datetime.utcnow()).strftime("%Y-%m-%d")
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"security-review-{stamp}.pdf",
+    )
 
 
 # ---------------- Startup & Database Migration ----------------

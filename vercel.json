@@ -12,7 +12,12 @@
     "api": {
       "root": "backend/",
       "entrypoint": "app:app",
-      "framework": "flask"
+      "framework": "flask",
+      "functions": {
+        "app.py": {
+          "maxDuration": 120
+        }
+      }
     }
   },
   "rewrites": [
@@ -27,6 +32,10 @@
     {
       "path": "/api/cron/qa-check",
       "schedule": "30 6 * * *"
+    },
+    {
+      "path": "/api/cron/security-check",
+      "schedule": "0 7 * * *"
     }
   ]
 }

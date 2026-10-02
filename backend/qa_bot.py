@@ -32,12 +32,14 @@ LARGE_BYTES = 3_000_000
 
 
 class FetchResult:
-    def __init__(self, path, status, ms, body, error=None):
+    def __init__(self, path, status, ms, body, error=None, headers=None):
         self.path = path
         self.status = status
         self.ms = ms
         self.body = body
         self.error = error
+        # Lower-cased header names, so callers can check presence without guessing.
+        self.headers = headers or {}
 
 
 def fetch(url, timeout=REQUEST_TIMEOUT):
@@ -58,6 +60,7 @@ def fetch(url, timeout=REQUEST_TIMEOUT):
             return FetchResult(
                 url, response.status, int((time.perf_counter() - start) * 1000),
                 raw.decode(charset, "replace"),
+                headers={k.lower(): v for k, v in response.getheaders()},
             )
     except urllib.error.HTTPError as e:
         body = ""
@@ -66,7 +69,8 @@ def fetch(url, timeout=REQUEST_TIMEOUT):
         except Exception:
             pass
         return FetchResult(
-            url, e.code, int((time.perf_counter() - start) * 1000), body, f"HTTP {e.code}"
+            url, e.code, int((time.perf_counter() - start) * 1000), body, f"HTTP {e.code}",
+            headers={k.lower(): v for k, v in (e.headers.items() if e.headers else [])},
         )
     except Exception as e:
         return FetchResult(
@@ -182,10 +186,31 @@ def same_host(url, base_url):
         return False
 
 
+def is_bot_challenge(result):
+    """
+    True when the edge firewall challenged us rather than the site failing.
+
+    Vercel and similar hosts answer automated traffic with 403 plus
+    x-vercel-mitigated: challenge. Treating that as an outage would report the
+    site as down when it is perfectly healthy.
+    """
+    if result.status != 403:
+        return False
+    return bool(
+        result.headers.get("x-vercel-mitigated")
+        or result.headers.get("cf-mitigated")
+        or "challenge" in (result.headers.get("server") or "").lower()
+    )
+
+
 def check_availability(base_url):
     """Pass 1: is the site up at all?"""
     result = fetch(base_url)
     issues = []
+
+    if is_bot_challenge(result):
+        # Report as an incomplete scan, never as an outage.
+        return result, [], True
 
     if result.status == 0:
         issues.append({
@@ -209,7 +234,7 @@ def check_availability(base_url):
             "message": f"Homepage took {result.ms}ms to respond.",
         })
 
-    return result, issues
+    return result, issues, False
 
 
 def check_pages(base_url, home_result):
@@ -456,8 +481,14 @@ def content_diff(previous_text, current_text, limit=12):
     return added[:limit], removed[:limit]
 
 
-def build_summary(status, issues, pages, assets, diff):
+def build_summary(status, issues, pages, assets, diff, blocked=False):
     """Plain-English headline the manager reads first."""
+    if blocked:
+        return (
+            "Scan incomplete. The host's firewall blocked this automated "
+            "request, so the site could not be checked. This is not an outage."
+        )
+
     critical = [i for i in issues if i["severity"] == "critical"]
     warnings = [i for i in issues if i["severity"] == "warning"]
 
@@ -483,7 +514,25 @@ def run_check(base_url, previous_text=None, previous_fingerprint=None):
     """Run every pass. Returns a plain dict ready for storage or JSON."""
     base_url = base_url.rstrip("/")
 
-    home, issues = check_availability(base_url)
+    home, issues, blocked = check_availability(base_url)
+
+    if blocked:
+        return {
+            "status": "inconclusive",
+            "homepage_status": home.status,
+            "response_ms": home.ms,
+            "pages": [],
+            "assets": [],
+            "issues": issues,
+            "scan_blocked": True,
+            "summary": build_summary("inconclusive", [], [], [], None, blocked=True),
+            "content_fingerprint": None,
+            "content_text": None,
+            "content_added": [],
+            "content_removed": [],
+            "checked_at": datetime.utcnow().isoformat(),
+        }
+
     if home.status == 0 or home.status >= 400:
         # Down or erroring: there is nothing further worth testing.
         return {
@@ -493,8 +542,10 @@ def run_check(base_url, previous_text=None, previous_fingerprint=None):
             "pages": [],
             "assets": [],
             "issues": issues,
+            "scan_blocked": False,
             "summary": build_summary("critical", issues, [], [], None),
             "content_fingerprint": None,
+            "content_text": None,
             "content_added": [],
             "content_removed": [],
             "checked_at": datetime.utcnow().isoformat(),
@@ -524,6 +575,7 @@ def run_check(base_url, previous_text=None, previous_fingerprint=None):
         "pages": pages,
         "assets": assets,
         "issues": all_issues,
+        "scan_blocked": False,
         "summary": build_summary(status, all_issues, pages, assets, diff),
         "content_fingerprint": fingerprint,
         "content_text": text.text,
