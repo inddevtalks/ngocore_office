@@ -68,7 +68,16 @@ function App() {
   const [taskMemberFilter, setTaskMemberFilter] = useState("all");
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
   const [securityOpen, setSecurityOpen] = useState(false);
+  // What Jarvis greets you by, editable from the Security panel.
+  const [managerName, setManagerName] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+
+  // Tells the stylesheet that the More sheet is up, so the floating Jarvis
+  // button and greeting step out of its way instead of overlapping it.
+  useEffect(() => {
+    document.body.classList.toggle("more-open", moreOpen);
+    return () => document.body.classList.remove("more-open");
+  }, [moreOpen]);
   const [prefilledMemberId, setPrefilledMemberId] = useState(null);
   const [toast, setToast] = useState("");
   // Read during the first render, not in an effect. Otherwise an employee
@@ -941,6 +950,8 @@ function App() {
       {securityOpen && (
         <SecurityModal
           passwordSource={authState.passwordSource}
+          managerName={managerName}
+          onSaved={setManagerName}
           onClose={() => setSecurityOpen(false)}
         />
       )}
@@ -967,6 +978,7 @@ function App() {
         openAssign={handleOpenAssignModal}
         editTask={setEditingTask}
         copyPortal={copyPortalLink}
+        managerName={managerName}
       />
 
       {loading && (
@@ -1624,18 +1636,39 @@ function EditTaskModal({ task, members, onClose, onSave, onDelete }) {
   );
 }
 
-function SecurityModal({ passwordSource, onClose }) {
+function SecurityModal({ passwordSource, managerName, onSaved, onClose }) {
   const [form, setForm] = useState({
     current_password: "",
     new_password: "",
     confirm_password: "",
   });
+  const [name, setName] = useState(managerName || "");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [errors, setErrors] = useState({});
 
   const change = e => setForm({ ...form, [e.target.name]: e.target.value });
+
+  // Saved on its own so the manager does not have to re-enter their password
+  // just to tell Jarvis what to call them.
+  async function saveName() {
+    const trimmed = name.trim();
+    if (trimmed === (managerName || "")) return;
+    try {
+      const res = await fetch(`${API}/api/manager/profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) throw new Error("Could not save your name.");
+      onSaved(trimmed);
+      setResult({ ok: true, message: `Jarvis will call you ${trimmed}.` });
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    }
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -1680,6 +1713,21 @@ function SecurityModal({ passwordSource, onClose }) {
   return (
     <Modal title="Security" onClose={onClose}>
       <form onSubmit={submit} className="form">
+        <label>
+          What Jarvis calls you
+          <input
+            type="text"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onBlur={saveName}
+            placeholder="Your first name is enough"
+          />
+          <span className="field-hint">
+            Used for the greeting when you open the office. Leave it blank and Jarvis
+            just says hello without a name.
+          </span>
+        </label>
+
         <div className="security-banner">
           <Shield size={16} />
           <div>
@@ -2038,7 +2086,7 @@ function SiteQaView({ onToast, onAuthLoss }) {
   );
 }
 
-function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, editTask, copyPortal }) {
+function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, editTask, copyPortal, managerName }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2052,6 +2100,9 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
   const [voiceOn, setVoiceOn] = useState(true);
   const [ttsSupported, setTtsSupported] = useState(false);
   const [pendingGreeting, setPendingGreeting] = useState(null);
+  // The arrival greeting sits on the page instead of opening the chat, so
+  // Jarvis says hello without taking the screen over every time you refresh.
+  const [greeting, setGreeting] = useState(null);
 
   // Speech output uses the browser's own synthesis engine: no API key, no cost.
   function speak(text) {
@@ -2100,43 +2151,72 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
   }
   const recognitionRef = useRef(null);
 
+  // Re-fetching when the saved name changes means the greeting updates the
+  // moment it is saved, without needing a page reload.
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const g = await api("/api/jarvis/greeting");
+        if (cancelled) return;
         setSuggestions(g.suggestions || []);
         setCaps(g.capability_count || 0);
         setMessages([{ role: "jarvis", blocks: { text: g.text, actions: g.actions } }]);
+        setGreeting({ text: g.text, actions: g.actions || [] });
         // Browsers block speech until the page has been interacted with, so the
         // greeting is only spoken after the first tap rather than on load.
         setPendingGreeting(g.text);
       } catch (e) {
+        if (cancelled) return;
         if (e.authRequired) return onAuthLoss();
         onToast(e.message);
       }
     })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managerName]);
 
+  useEffect(() => {
     // Web Speech API is free and browser-native: no API key, no cost.
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SR) {
       setSpeechSupported(true);
       const recognition = new SR();
       recognition.continuous = false;
-      recognition.interimResults = false;
+      // Interim results show what it is hearing as you speak, which is what
+      // makes it obvious the mic is live rather than silently broken.
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
       recognition.lang = "en-IN";
+
+      let finalText = "";
       recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setInput(transcript);
-        setListening(false);
-        send(transcript);
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const chunk = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalText += chunk;
+          else interim += chunk;
+        }
+        if (interim) setInput(finalText + interim);
+        if (finalText.trim()) {
+          const said = finalText.trim();
+          finalText = "";
+          setListening(false);
+          send(said);
+        }
       };
-      recognition.onerror = () => {
+      recognition.onerror = (event) => {
         setListening(false);
-        onToast("I could not hear that. Try again, or type instead.");
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          onToast("Microphone is blocked. Allow it in your browser settings, then tap the mic again.");
+        } else if (event.error === "no-speech") {
+          onToast("I did not catch that. Tap the mic and speak straight after.");
+        } else if (event.error !== "aborted") {
+          onToast("Voice input did not work in this browser. You can type instead.");
+        }
       };
       recognition.onend = () => setListening(false);
       recognitionRef.current = recognition;
-      setIsOpen(true);   // Opening on load means the first question can be spoken.
       if (window.speechSynthesis) { setTtsSupported(true); }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2172,29 +2252,101 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
 
   function startListening() {
     if (!recognitionRef.current || listening) return;
+    // Speaking and listening at the same time stops recognition from hearing
+    // anything, because the microphone picks up the assistant's own voice.
+    stopSpeaking();
+    setIsOpen(true);
     try {
       recognitionRef.current.start();
       setListening(true);
-    } catch {
+    } catch (err) {
       setListening(false);
+      onToast("I could not open the microphone. Check the browser permission.");
     }
   }
 
+  function dismissGreeting() {
+    setGreeting(null);
+    setPendingGreeting(null);
+  }
+
+  // Tapping the greeting opens the chat and clears it from the page, so the
+  // two never sit on top of each other.
+  function openFromGreeting() {
+    if (pendingGreeting) {
+      speak(pendingGreeting);
+      setPendingGreeting(null);
+    }
+    dismissGreeting();
+    setIsOpen(true);
+  }
+
+  // Every suggested button funnels through here: actions that only carry a
+  // question get asked, and the rest navigate or open the right editor.
   function runAction(action) {
-    if (action.action === "goto" && setActiveView) setActiveView(action.view);
-    if (action.action === "open_assign" && openAssign) openAssign(action.member_id);
+    if (action.message) {
+      setGreeting(null);
+      if (!isOpen) setIsOpen(true);
+      send(action.message);
+      return;
+    }
+    if (action.action === "goto" && setActiveView) {
+      setGreeting(null);
+      setActiveView(action.view);
+    }
+    if (action.action === "open_assign" && openAssign) {
+      setGreeting(null);
+      setIsOpen(false);
+      openAssign(action.member_id);
+    }
     if (action.action === "edit_task" && editTask) {
-      const task = data.tasks.find(t => t.id === action.task_id);
+      setGreeting(null);
+      setIsOpen(false);
+      const task = (data.tasks || []).find(t => t.id === action.task_id);
       if (task) editTask(task);
     }
     if (action.action === "copy_portal" && copyPortal) copyPortal(action.member_id);
-    if (action.action === "open_portal" && setActiveView) setActiveView("who_working");
+    if (action.action === "open_portal" && setActiveView) {
+      setGreeting(null);
+      setIsOpen(false);
+      setActiveView("who_working");
+    }
   }
 
   return (
     <>
+      {/* Arrival greeting. Sits on the page like being greeted at the door,
+          rather than opening a chat that covers the dashboard on every reload. */}
+      {greeting && !isOpen && (
+        <div className="jarvis-greeting-card" role="status">
+          <button className="jarvis-greeting-close" onClick={dismissGreeting} aria-label="Dismiss greeting">
+            <X size={14} />
+          </button>
+          <div className="jarvis-greeting-head">
+            <span className="jarvis-greeting-orb"><Bot size={15} /></span>
+            <strong>Jarvis</strong>
+          </div>
+          <p className="jarvis-greeting-text">
+            <JarvisBlocks blocks={greeting} onAction={runAction} />
+          </p>
+          <div className="jarvis-greeting-actions">
+            <button className="jarvis-greeting-ask" onClick={openFromGreeting}>
+              <Bot size={13} /> Ask Jarvis
+            </button>
+            {speechSupported && (
+              <button className="jarvis-greeting-mic" onClick={startListening} title="Speak your question">
+                <Mic size={13} /> Speak
+              </button>
+            )}
+            <button className="jarvis-greeting-mute" onClick={toggleVoice} title={voiceOn ? "Mute Jarvis" : "Unmute Jarvis"}>
+              {voiceOn ? <Volume2 size={13} /> : <VolumeX size={13} />}
+            </button>
+          </div>
+        </div>
+      )}
+
       <button
-        className={`jarvis-fab ${listening ? "listening" : ""} ${isOpen ? "active" : ""}`}
+        className={`jarvis-fab ${listening ? "listening" : ""} ${isOpen ? "active" : ""} ${greeting && !isOpen ? "nudge" : ""}`}
         onClick={() => {
           // First tap satisfies the browser's autoplay rule, so the greeting
           // can finally be spoken aloud.
@@ -2203,8 +2355,12 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
             setPendingGreeting(null);
           }
           if (isOpen) setIsOpen(false);
-          else setIsOpen(true);
+          else {
+            dismissGreeting();
+            setIsOpen(true);
+          }
         }}
+        data-testid="jarvis-fab"
         title={speechSupported ? "Ask Jarvis by voice" : "Voice input not supported in this browser"}
         aria-label="Ask Jarvis"
       >
@@ -2350,10 +2506,12 @@ function JarvisBlocks({ blocks, onAction }) {
       {blocks.actions && blocks.actions.length > 0 && (
         <div className="jarvis-actions">
           {blocks.actions.map((a, i) => (
+            // Everything routes through onAction. send() lives in the parent,
+            // so calling it here directly threw and the button did nothing.
             <button
               key={i}
-              onClick={() => (a.message ? send(a.message) : onAction(a))}
-              title={a.message || ""}
+              onClick={() => onAction(a)}
+              title={a.message || a.action || ""}
             >
               {a.label}
             </button>

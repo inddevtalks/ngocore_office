@@ -143,18 +143,25 @@ def intent_workload_overview(ctx):
         return {"text": "No team yet, so there is nobody to report on."}
 
     working_rows, idle_rows = [], []
+    actually_working = 0
+    total_open = 0
+
     for m in members:
         mine = [t for t in tasks if t.member_id == _field(m, "id")]
         open_mine = [t for t in mine if t.status != "done"]
         doing = [t for t in mine if t.status == "in_progress"]
         review = [t for t in mine if t.status == "review"]
 
+        total_open += len(open_mine)
         if doing:
-            state = f"On it: {doing[0].title}"
+            actually_working += 1
+
+        if doing:
+            state = f"On it: {_title(doing[0])}"
         elif review:
-            state = f"Done and waiting on you ({len(review)})"
+            state = f"Finished, waiting on you ({len(review)})"
         elif open_mine:
-            state = f"{len(open_mine)} lined up, hasn't started"
+            state = f"{len(open_mine)} lined up, not started yet"
         else:
             state = "Free"
 
@@ -162,23 +169,37 @@ def intent_workload_overview(ctx):
                f"{_field(m, 'role')} | {len(open_mine)} | {state} |")
         (working_rows if open_mine else idle_rows).append(row)
 
-    n_working = len(working_rows)
-    if n_working == 0:
-        verdict = "Nobody has anything on at the moment, which is worth a look."
-    elif n_working == len(members):
-        verdict = "Everyone is loaded up. Watch for burnout here."
-    else:
-        idle_names = ", ".join(
-            _first_name(m) for m in members
-            if not [t for t in tasks if t.member_id == _field(m, "id") and t.status != "done"]
+    idle_members = [
+        m for m in members
+        if not [t for t in tasks if t.member_id == _field(m, "id") and t.status != "done"]
+    ]
+    idle_names = _short_list([_first_name(m) for m in idle_members]) if idle_members else ""
+
+    if total_open == 0:
+        verdict = "Nothing open anywhere on the board right now."
+    elif actually_working == 0:
+        verdict = (
+            f"{total_open} things are open but nobody has actually started one. "
+            "Might be worth a nudge."
         )
-        verdict = f"{n_working} of {len(members)} are working. {idle_names or 'Nobody'} has room."
+    else:
+        head = (
+            f"{actually_working} of {len(members)} "
+            f"{'person is' if actually_working == 1 else 'people are'} actually working"
+        )
+        if idle_names:
+            tail = (
+                f"{idle_names} {'has' if len(idle_members) == 1 else 'have'} nothing on"
+            )
+        else:
+            tail = "everyone has something to do"
+        verdict = f"{head[0].upper()}{head[1:]}, so {tail}. {total_open} open in total."
 
     blocks = ["| Person | Role | Open | Where they are |", "|---|---|---|---|"]
     blocks.extend(working_rows + idle_rows)
 
     return {
-        "text": f"Straight answer: {verdict}",
+        "text": verdict,
         "table": blocks,
         "actions": [
             {"label": "See it laid out", "action": "goto", "view": "who_working"},
@@ -216,9 +237,11 @@ def intent_who_is_free(ctx):
     return {
         "text": (
             f"Give it to **{_first_name(top)}** — "
-            + ("nothing is open for them at the moment"
+            + ("nothing open at the moment"
                if top_load == 0 else "barely started, just the one thing")
-            + f". {len(free)} of your {len(members)} people have room."
+            + f". That is {len(free)} of your {len(members)}, "
+            f"so there is {'somewhere' if len(free) == len(members) else 'room'} "
+            f"to hand work over."
         ),
         "list": lines,
         "actions": [
@@ -256,22 +279,28 @@ def intent_overdue(ctx):
     today = [t for t in tasks if _due_state(t) == "today"]
 
     if not overdue and not today:
-        return {"text": "Nothing is late and nothing is due today. You are completely clear."}
+        return {"text": "Nothing late, nothing due today. You are completely clear."}
 
     parts = []
     if overdue:
-        parts.append(f"**Overdue ({len(overdue)}):**")
+        parts.append(f"**Running late ({len(overdue)}):**")
         parts += [f"- {_format_task_line(t, '')} — {_task_name(t)}" for t in overdue[:8]]
     if today:
         parts.append(f"**Due today ({len(today)}):**")
         parts += [f"- {_format_task_line(t, '')} — {_task_name(t)}" for t in today[:8]]
 
+    if overdue and today:
+        lead = (
+            f"{len(overdue)} past their date and {len(today)} due today. "
+            "The late ones first, then it is out of the way."
+        )
+    elif overdue:
+        lead = f"{len(overdue)} past the date. Nothing due today, so these are the only pressure."
+    else:
+        lead = f"{len(today)} due today, nothing actually late yet."
+
     return {
-        "text": (
-            f"{len(overdue)} overdue and {len(today)} due today. "
-            + ("Nothing is actually running late, so relax." if not overdue
-               else "Those late ones need a nudge.")
-        ),
+        "text": lead,
         "list": parts,
         "actions": [{"label": "Open All Tasks", "action": "goto", "view": "tasks"}],
     }
@@ -281,11 +310,13 @@ def intent_needs_review(ctx):
     """Tasks waiting for the manager."""
     tasks = [t for t in ctx["tasks"] if t.status == "review"]
     if not tasks:
-        return {"text": "Nothing is waiting on you. No tasks are sitting in review."}
+        return {
+            "text": "Nothing waiting on you. Review queue is empty, which is a nice change.",
+        }
     return {
         "text": (
             f"{len(tasks)} {'task is' if len(tasks) == 1 else 'tasks are'} "
-            "sitting with you waiting on a look:"
+            "finished and sitting with you, waiting on you to sign off:"
         ),
         "list": [f"- {_format_task_line(t, '')} — {_task_name(t)}" for t in tasks],
         "actions": [{"label": "Open All Tasks", "action": "goto", "view": "tasks"}],
@@ -371,7 +402,13 @@ def intent_today_plan(ctx):
     for name, group in by_member.items():
         parts.append(f"**{name}**")
         parts += [f"- {t.title} ({STATUS_LABELS[t.status]})" for t in group]
-    return {"text": f"Today's plan covers {len(tasks)} task(s):", "list": parts}
+    return {
+        "text": (
+            f"{len(tasks)} {'thing needs' if len(tasks) == 1 else 'things need'} "
+            "your attention today:"
+        ),
+        "list": parts,
+    }
 
 
 def intent_completed(ctx):
@@ -381,7 +418,10 @@ def intent_completed(ctx):
         return {"text": "Nothing completed yet, so there is no track record to show you."}
     recent = done[:10]
     return {
-        "text": f"{len(done)} task(s) completed in total. Most recent:",
+        "text": (
+            f"{len(done)} {'task has' if len(done) == 1 else 'tasks have'} been "
+            f"finished in total. {'The latest one is' if len(done) == 1 else 'The latest ones are'}:"
+        ),
         "list": [f"- {t.title} — {_task_name(t)}"
                  + (f", finished {str(t.updated_at)[:10]}" if t.updated_at else "")
                  for t in recent],
@@ -394,18 +434,34 @@ def intent_task_status(ctx, text):
     task = _find_task(text, ctx["tasks"])
     if not task:
         return {"text": "I could not match that to a task. Try a few words from its title."}
+    owner = _task_name(task)
+    assigned = (
+        f" with {owner}" if owner and owner != "Unassigned"
+        else " and nobody has picked it up yet"
+    )
+    # member_avatar/member_role only exist on the JSON form, so read them
+    # through _field rather than as attributes.
+    avatar = _field(task, "member_avatar") or ""
+    role = _field(task, "member_role") or "no role set"
+    assignee_line = (
+        f"- Assignee: {avatar} {owner} ({role})"
+        if owner and owner != "Unassigned"
+        else "- Assignee: nobody yet"
+    )
+
     return {
         "text": (
-            f"**{task.title}** is {STATUS_LABELS.get(task.status, task.status)} "
-            f"with {_task_name(task)}. Priority {task.priority}"
+            f"**{task.title}** is {STATUS_LABELS.get(task.status, task.status)}"
+            f"{assigned}. Priority {task.priority}"
             + (f", due {task.due_date}." if task.due_date else ".")
         ),
-        "list": [f"- Assignee: {task.member_avatar} {_task_name(task)} ({task.member_role})"]
-        + ([f"- Notes: {task.notes}"] if task.notes else []),
+        "list": [assignee_line]
+        + ([f"- Notes: {_field(task, 'notes')}"] if _field(task, "notes") else []),
         "actions": [
             {"label": "Edit this task", "action": "edit_task", "task_id": task.id},
-            {"label": f"Open {_task_name(task)}'s portal", "action": "open_portal", "member_id": task.member_id},
-        ],
+        ]
+        + ([{"label": f"Open {owner}'s portal", "action": "open_portal", "member_id": task.member_id}]
+           if owner and owner != "Unassigned" and task.member_id else []),
     }
 
 
@@ -592,82 +648,6 @@ def intent_list_tasks(ctx):
     }
 
 
-def intent_greeting(ctx):
-    return {
-        "text": greeting(),
-        "actions": [
-            {"label": "Team summary", "message": "team summary"},
-            {"label": "Who is free?", "message": "who is free"},
-            {"label": "What is overdue?", "message": "what is overdue"},
-        ],
-    }
-
-
-def intent_ask_whats_next(ctx):
-    """The 'what should I do next' answer, worked out from live data."""
-    tasks = _open_tasks(ctx["tasks"])
-    members = ctx["members"]
-    if not members:
-        return {"text": "No team set up yet, so there is nothing I can prioritise."}
-
-    if not tasks:
-        return {
-            "text": (
-                "Nothing open at the moment. I would use the time to plan the next "
-                "round of work rather than rush something."
-            ),
-            "actions": [
-                {"label": "See who's around", "message": "who is free"},
-                {"label": "How's my site?", "message": "is my site up"},
-            ],
-        }
-
-    steps = []
-
-    review = [t for t in tasks if t.status == "review"]
-    if review:
-        steps.append(
-            f"Clear your review queue first. **{len(review)}** "
-            f"{'task is' if len(review) == 1 else 'tasks are'} sitting with you: "
-            + ", ".join(t.title for t in review[:3])
-        )
-
-    overdue = [t for t in tasks if _due_state(t) == "overdue"]
-    if overdue:
-        steps.append(
-            f"Then chase **{len(overdue)}** running late: "
-            + ", ".join(t.title for t in overdue[:3])
-        )
-
-    idle = [m for m in members if len([t for t in tasks if t.member_id == _field(m, "id")]) <= 1]
-    if idle:
-        who = ", ".join(f"{_first_name(m)} ({_field(m, 'role')})" for m in idle[:3])
-        steps.append(f"And hand the next bit of work to someone with room: {who}")
-
-    qa = ctx.get("qa_run")
-    if qa and _field(qa, "status") == "critical":
-        steps.append("Worth knowing your website is throwing errors right now.")
-
-    if not steps:
-        steps.append(
-            "Nothing is blocked. Honestly the best use of your time right now is checking "
-            "in with the team rather than pushing more work on."
-        )
-
-    return {
-        "text": (
-            "Straight answer: work through these in order and you are clear. "
-            "That is what your numbers say right now."
-        ),
-        "list": steps,
-        "actions": [
-            {"label": "Open All Tasks", "action": "goto", "view": "tasks"},
-            {"label": "Who's working?", "message": "who is working"},
-            {"label": "Anything late?", "message": "what is overdue"},
-        ],
-    }
-
-
 def intent_help(ctx):
     return {
         "text": "Here is what I can do. Type or speak any of these:",
@@ -689,6 +669,207 @@ def intent_help(ctx):
     }
 
 
+def _first_name(member):
+    name = (_field(member, "name") or "").strip()
+    return name.split()[0] if name else "there"
+
+
+def _part_of_day():
+    hour = datetime.utcnow().hour
+    if hour < 12:
+        return "Morning"
+    if hour < 17:
+        return "Afternoon"
+    return "Evening"
+
+
+def _short_list(items, limit=3):
+    names = list(items)
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f" and {len(names) - limit} others"
+
+
+def build_briefing(ctx):
+    """What Jarvis says when you walk into the office.
+
+    Written the way a colleague would say it out loud: a greeting, one honest
+    sentence about the state of things, then the detail. No dashboard-speak.
+    """
+    members = ctx["members"]
+    tasks = ctx["tasks"]
+
+    if not members:
+        return {
+            "text": (
+                f"{_address(ctx)}. Nice to see you. I have got nothing to report yet "
+                "though, because there is no team set up. Add your people and I will "
+                "keep track of everything for you."
+            ),
+            "actions": [{"label": "Add your team", "action": "goto", "view": "overview"}],
+        }
+
+    open_tasks = _open_tasks(tasks)
+    working = [t for t in open_tasks if t.status == "in_progress"]
+    review = [t for t in open_tasks if t.status == "review"]
+    overdue = [t for t in open_tasks if _due_state(t) == "overdue"]
+    idle = [
+        m for m in members
+        if not [t for t in open_tasks if t.member_id == _field(m, "id")]
+    ]
+
+    if not open_tasks:
+        return {
+            "text": (
+                f"{_address(ctx)}. Board is completely clear, nothing open at all. "
+                f"You have {len(members)} {'person' if len(members) == 1 else 'people'} "
+                "and not a single thing on their plate. Rare day. Enjoy it."
+            ),
+            "actions": [
+                {"label": "See your team", "message": "who is working"},
+                {"label": "How's the site?", "message": "is my site up"},
+            ],
+        }
+
+    # One lead sentence, chosen by whatever actually matters most right now.
+    if overdue:
+        lead = (
+            f"{len(overdue)} {'thing is' if len(overdue) == 1 else 'things are'} "
+            "running late, so I would deal with that first."
+        )
+    elif review:
+        lead = (
+            f"{len(review)} {'task is' if len(review) == 1 else 'tasks are'} "
+            "finished and sitting with you waiting for a look."
+        )
+    elif idle:
+        lead = (
+            f"{_short_list([_first_name(m) for m in idle])} "
+            f"{'has' if len(idle) == 1 else 'have'} nothing on right now."
+        )
+    else:
+        lead = "Everything is moving, honestly. Nobody is stuck and nothing is late."
+
+    who_works = []
+    for m in members:
+        mine = [t for t in open_tasks if t.member_id == _field(m, "id")]
+        if not mine:
+            continue
+        doing = [t for t in mine if t.status == "in_progress"]
+        if doing:
+            # _title is the task name; _task_name is the assignee.
+            who_works.append(f"**{_first_name(m)}** is on {_title(doing[0])}")
+        elif any(t.status == "review" for t in mine):
+            who_works.append(f"**{_first_name(m)}** has finished something and is waiting on you")
+        else:
+            who_works.append(f"**{_first_name(m)}** has {len(mine)} lined up")
+
+    text = f"{_address(ctx)}. {lead} "
+
+    if working:
+        text += f"Right now {len(working)} {'task is' if len(working) == 1 else 'tasks are'} actually being worked on. "
+
+    if who_works:
+        text += _short_list(who_works) + ". "
+
+    if idle:
+        text += f"{_short_list([_first_name(m) for m in idle])} could take something on if you need it handed over. "
+
+    text += "What do you want to get on with?"
+
+    actions = [{"label": "What should I do next?", "message": "what should I do next"}]
+    if idle:
+        actions.append({
+            "label": f"Give work to {_first_name(idle[0])}",
+            "action": "open_assign",
+            "member_id": _field(idle[0], "id"),
+        })
+    actions.append({"label": "Who is working?", "message": "who is working"})
+    if overdue:
+        actions.append({"label": "What is late?", "message": "what is overdue"})
+
+    return {"text": text, "actions": actions}
+
+
+def intent_greeting(ctx):
+    return build_briefing(ctx)
+
+
+def greeting(name=None):
+    """Fallback line when there is no workspace to read."""
+    who = f", {str(name).strip().split()[0]}" if name else ""
+    return f"{_part_of_day()}{who}. Good to see you. What do you want to get on with?"
+
+
+def ask_whats_next(ctx):
+    """The 'what should I do next' answer, worked out from live data."""
+    tasks = _open_tasks(ctx["tasks"])
+    members = ctx["members"]
+    if not members:
+        return {"text": "No team set up yet, so there is nothing I can prioritise."}
+
+    if not tasks:
+        return {
+            "text": (
+                "Nothing open at the moment, so nothing is on fire. If you want, "
+                "give me the next piece of work and I will put it on the board."
+            ),
+            "actions": [
+                {"label": "See who's around", "message": "who is free"},
+                {"label": "How's the site?", "message": "is my site up"},
+            ],
+        }
+
+    steps = []
+
+    review = [t for t in tasks if t.status == "review"]
+    if review:
+        steps.append(
+            f"**Look at {_short_list([_title(t) for t in review])} first.** "
+            f"{'It is' if len(review) == 1 else 'They are'} finished, just waiting on you "
+            "to say yes or send it back."
+        )
+
+    overdue = [t for t in tasks if _due_state(t) == "overdue"]
+    if overdue:
+        steps.append(
+            f"**Chase {_short_list([_title(t) for t in overdue])}.** "
+            "Those are past their date, so a quick nudge beats a big conversation."
+        )
+
+    idle = [
+        m for m in members
+        if len([t for t in tasks if t.member_id == _field(m, "id")]) <= 1
+    ]
+    if idle:
+        steps.append(
+            f"**Hand the next one to {_short_list([_first_name(m) for m in idle])}.** "
+            "Room to take it on, so nothing sits waiting for a person."
+        )
+
+    qa = ctx.get("qa_run")
+    if qa and _field(qa, "status") == "critical":
+        steps.append("**Your website is throwing errors.** Worth a look before it costs you visitors.")
+
+    if not steps:
+        steps.append(
+            "Nothing is blocked anywhere. Genuinely the best use of your time right now "
+            "is checking in with the team rather than piling more on."
+        )
+
+    return {
+        "text": "Straight answer, work through these in order and you are clear:",
+        "list": steps,
+        "actions": [
+            {"label": "Open All Tasks", "action": "goto", "view": "tasks"},
+            {"label": "Who is working?", "message": "who is working"},
+            {"label": "Anything late?", "message": "what is overdue"},
+        ],
+    }
+
+
+def intent_ask_whats_next(ctx):
+    return ask_whats_next(ctx)
 # --------------------------------------------------------------------------
 # router
 # --------------------------------------------------------------------------
@@ -739,14 +920,22 @@ INTENTS = [
 ]
 
 
-def build_context(members, tasks, qa_run=None, security_run=None):
+def build_context(members, tasks, qa_run=None, security_run=None, manager_name=""):
     return {
         "members": members,
         "tasks": tasks,
         "index": _member_lookup(members),
         "qa_run": qa_run,
         "security_run": security_run,
+        "manager_name": (manager_name or "").strip(),
     }
+
+
+def _address(ctx):
+    """'Morning' or 'Morning, Peter'. Jarvis greets by the name you saved."""
+    part = _part_of_day()
+    name = (ctx.get("manager_name") or "").strip()
+    return f"{part}, {name.split()[0]}" if name else part
 
 
 def _dispatch(handler, ctx, text, index):
@@ -768,9 +957,9 @@ def _dispatch(handler, ctx, text, index):
     return handler(ctx)
 
 
-def handle(message, members, tasks, qa_run=None, security_run=None):
+def handle(message, members, tasks, qa_run=None, security_run=None, manager_name=""):
     """Route one message to a handler and return a structured reply."""
-    ctx = build_context(members, tasks, qa_run, security_run)
+    ctx = build_context(members, tasks, qa_run, security_run, manager_name)
     text = (message or "").strip()
     index = ctx["index"]
 
@@ -810,161 +999,6 @@ def handle(message, members, tasks, qa_run=None, security_run=None):
     }
 
 
-def _first_name(member):
-    name = (_field(member, "name") or "").strip()
-    return name.split()[0] if name else "there"
-
-
-def build_briefing(ctx):
-    """A short, human status read for the moment the manager arrives."""
-    members = ctx["members"]
-    tasks = ctx["tasks"]
-    if not members:
-        return {
-            "text": "Hey, good to see you. We have not got any team set up yet though, "
-                    "so there is nothing for me to report. Add your people and I will "
-                    "keep an eye on it for you.",
-            "actions": [{"label": "Add a team member", "action": "goto", "view": "overview"}],
-        }
-
-    open_tasks = _open_tasks(tasks)
-    working = [t for t in open_tasks if t.status == "in_progress"]
-    review = [t for t in open_tasks if t.status == "review"]
-    overdue = [t for t in open_tasks if _due_state(t) == "overdue"]
-    idle = [
-        m for m in members
-        if len([t for t in open_tasks if t.member_id == _field(m, "id")]) == 0
-    ]
-
-    # Say the quiet days plainly instead of padding with numbers.
-    if not open_tasks:
-        return {
-            "text": (
-                f"Hey {_first_name(members[0])}, board is completely clear. "
-                f"Nothing open across {len(members)} people. Good moment to plan ahead, "
-                "or take the day off for once."
-            ),
-            "actions": [
-                {"label": "Who should I give work to?", "message": "who is free"},
-                {"label": "How's my site?", "message": "is my site up"},
-            ],
-        }
-
-    lines = []
-    if working:
-        lines.append(
-            f"**{len(working)}** {'task is' if len(working) == 1 else 'tasks are'} "
-            f"actually in progress right now"
-        )
-    if review:
-        lines.append(f"**{len(review)}** {'is' if len(review) == 1 else 'are'} sitting with you waiting on a look")
-    if overdue:
-        lines.append(f"**{len(overdue)}** {'is' if len(overdue) == 1 else 'are'} running late")
-    if idle:
-        who = ", ".join(_first_name(m) for m in idle[:3])
-        lines.append(f"**{who}** {'has' if len(idle) == 1 else 'have'} nothing on, so there is room to hand something over")
-
-    body = ", ".join(lines) if lines else "Things are ticking along quietly"
-
-    return {
-        "text": (
-            f"Hey {_first_name(members[0])}, how are you doing? Here is where things stand. "
-            f"You have {len(open_tasks)} open {'task' if len(open_tasks) == 1 else 'tasks'} "
-            f"across {len(members)} people. {body}. "
-            "What do you want to get on with?"
-        ),
-        "list": [],
-        "actions": [
-            {"label": "Tell me what to do next", "message": "what should I do next"},
-            {"label": "Who's actually working?", "message": "who is working"},
-            {"label": "Anyone free?", "message": "who is free"},
-            {"label": "What's running late?", "message": "what is overdue"},
-        ],
-    }
-
-
-def intent_greeting(ctx):
-    return build_briefing(ctx)
-
-
-def greeting(name=None):
-    """Fallback greeting when there is no workspace context to read."""
-    hour = datetime.utcnow().hour
-    if hour < 12:
-        part = "Morning"
-    elif hour < 17:
-        part = "Afternoon"
-    else:
-        part = "Evening"
-    who = f" {_first_name_str(name)}" if name else ""
-    return f"{part}{who}. Good to see you. What do you want to get on with?"
-
-
-def _first_name_str(name):
-    return str(name).strip().split()[0] if name else ""
-
-
-def ask_whats_next(ctx):
-    """The 'what should I do next' answer, worked out from live data."""
-    tasks = _open_tasks(ctx["tasks"])
-    members = ctx["members"]
-    if not tasks:
-        return {
-            "text": "Your board is completely clear right now. Good moment to plan ahead.",
-            "actions": [
-                {"label": "See the team", "action": "goto", "view": "who_working"},
-                {"label": "Check my site", "message": "is my site up"},
-            ],
-        }
-
-    steps = []
-
-    review = [t for t in tasks if t.status == "review"]
-    if review:
-        steps.append(
-            f"**Review {len(review)} task(s)** that are waiting on you: "
-            + ", ".join(t.title for t in review[:3])
-        )
-
-    overdue = [t for t in tasks if _due_state(t) == "overdue"]
-    if overdue:
-        steps.append(
-            f"**Chase {len(overdue)} overdue task(s)**: "
-            + ", ".join(t.title for t in overdue[:3])
-        )
-
-    idle = [
-        m for m in members
-        if len([t for t in tasks if t.member_id == m.id]) <= 1
-    ]
-    if idle:
-        steps.append(
-            f"**Put work to someone free**: "
-            + ", ".join(f"{m.name} ({m.role})" for m in idle[:3])
-        )
-
-    qa = ctx.get("qa_run")
-    if qa and _field(qa, "status") == "critical":
-        steps.append("**Your website is reporting a problem.** I can tell you what.")
-
-    if not steps:
-        steps.append(
-            "Nothing is blocked right now. It is a good time to check in with the team "
-            "or pick up the next piece of work yourself."
-        )
-
-    return {
-        "text": (
-            f"How are you doing? Here is what I would tackle next, based on what I can see "
-            f"across {len(members)} people and {len(tasks)} open tasks."
-        ),
-        "list": steps,
-        "actions": [
-            {"label": "Open All Tasks", "action": "goto", "view": "tasks"},
-            {"label": "Who is free?", "message": "who is free"},
-            {"label": "What is overdue?", "message": "what is overdue"},
-        ],
-    }
 
 
 SUGGESTIONS = [

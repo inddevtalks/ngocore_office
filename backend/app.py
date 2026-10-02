@@ -545,6 +545,32 @@ def health():
     })
 
 
+def get_manager_name():
+    """What Jarvis calls you. Falls back to the MANAGER_NAME env var."""
+    row = AppSetting.query.filter_by(key="manager_name").first()
+    stored = (row.value if row else "").strip()
+    return stored or os.getenv("MANAGER_NAME", "").strip()
+
+
+@app.post("/api/manager/profile")
+@require_admin
+def manager_profile():
+    """Save the name Jarvis greets you by, and how it should talk to you."""
+    data = request.get_json(silent=True) or {}
+    # Coerce rather than trust: a non-string here would otherwise 500.
+    raw = data.get("name")
+    name = (raw if isinstance(raw, str) else "").strip()[:60]
+
+    row = AppSetting.query.filter_by(key="manager_name").first()
+    if row:
+        row.value = name
+    else:
+        db.session.add(AppSetting(key="manager_name", value=name))
+    db.session.commit()
+
+    return jsonify({"ok": True, "name": name})
+
+
 @app.get("/api/dashboard")
 @require_admin
 def dashboard():
@@ -1191,13 +1217,30 @@ def jarvis_ask():
     qa_run = _latest_qa_run()
     sec_run = _latest_security_run()
 
-    reply = jarvis.handle(
-        message,
-        members,
-        tasks,
-        qa_run.to_dict() if qa_run else None,
-        sec_run.to_dict() if sec_run else None,
-    )
+    try:
+        reply = jarvis.handle(
+            message,
+            members,
+            tasks,
+            qa_run.to_dict() if qa_run else None,
+            sec_run.to_dict() if sec_run else None,
+            manager_name=get_manager_name(),
+        )
+    except Exception:
+        # One bad phrasing must not leave the assistant dead for the whole
+        # session, so fall back to something honest instead of a 500.
+        current_app.logger.exception("jarvis failed on %r", message)
+        reply = {
+            "text": (
+                "I stumbled on that one, sorry. Try asking who is working, "
+                "what is overdue, or what needs your review."
+            ),
+            "actions": [
+                {"label": "Who is working?", "message": "who is working"},
+                {"label": "What needs my review?", "message": "what needs my review"},
+            ],
+        }
+
     reply["asked"] = message
     return jsonify(reply)
 
@@ -1216,6 +1259,7 @@ def jarvis_greeting():
         tasks,
         qa_run.to_dict() if qa_run else None,
         sec_run.to_dict() if sec_run else None,
+        manager_name=get_manager_name(),
     )
     briefing = jarvis.build_briefing(ctx)
 
@@ -1223,6 +1267,7 @@ def jarvis_greeting():
         "text": briefing["text"],
         "actions": briefing.get("actions", []),
         "suggestions": jarvis.SUGGESTIONS,
+        "manager_name": ctx.get("manager_name", ""),
         "capability_count": len(jarvis.INTENTS)
         + len(jarvis._task_context(""))
         + len(jarvis._person_context("")),

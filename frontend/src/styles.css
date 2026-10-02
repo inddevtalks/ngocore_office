@@ -2509,6 +2509,98 @@ button { cursor: pointer; color: inherit; }
 .completed-row:hover { background: #101d2e; }
 
 /* ---------------- JARVIS ---------------- */
+
+/* Arrival greeting card. Sits top-right on desktop, above the content on
+   phones, and never overlaps the bottom bar or the More sheet. */
+.jarvis-greeting-card {
+  position: fixed;
+  top: 70px;
+  right: 22px;
+  width: min(360px, calc(100vw - 24px));
+  z-index: 68;
+  background: linear-gradient(160deg, #12303c, #0c1a26);
+  border: 1px solid #2f6f7a;
+  border-radius: 14px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  animation: greeting-in 0.35s ease-out;
+}
+@keyframes greeting-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.jarvis-greeting-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  border: 0;
+  background: transparent;
+  color: #7f95a8;
+  cursor: pointer;
+  padding: 4px;
+  line-height: 0;
+}
+.jarvis-greeting-close:hover { color: #fff; }
+.jarvis-greeting-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.jarvis-greeting-orb {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #16414f;
+  color: #7fe3f0;
+  display: grid;
+  place-items: center;
+}
+.jarvis-greeting-head strong {
+  font: 700 11px "Space Grotesk";
+  letter-spacing: 1.4px;
+  color: #7fe3f0;
+}
+.jarvis-greeting-text {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #dbe7f1;
+}
+.jarvis-greeting-text .jarvis-text { margin: 0; }
+.jarvis-greeting-text .jarvis-actions { margin-top: 10px; }
+.jarvis-greeting-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.jarvis-greeting-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  background: #0e1c2a;
+  color: #c2d2e1;
+}
+.jarvis-greeting-ask {
+  background: var(--gold) !important;
+  border-color: var(--gold) !important;
+  color: #07101c !important;
+}
+.jarvis-greeting-mute { margin-left: auto; padding: 7px 9px !important; }
+
+.jarvis-fab.nudge { animation: jarvis-nudge 2.4s ease-in-out infinite; }
+@keyframes jarvis-nudge {
+  0%, 100% { box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55); }
+  50% { box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55), 0 0 0 10px rgba(47, 111, 122, 0.35); }
+}
+
 .jarvis-fab {
   position: fixed;
   right: 22px;
@@ -3331,6 +3423,14 @@ button { cursor: pointer; color: inherit; }
   cursor: pointer;
 }
 
+.field-hint {
+  display: block;
+  margin-top: 5px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #6f8397;
+}
+
 .toast {
   position: fixed;
   right: 20px;
@@ -3488,4 +3588,36 @@ footer {
     bottom: 12px;
     width: auto;
   }
+
+  /* ---- Jarvis on phones ----
+     The bottom bar is 70px tall, so the button has to sit above it or it
+     covers the navigation. The greeting card also drops below the sticky
+     header and above the bar so nothing overlaps. */
+  .jarvis-fab {
+    bottom: 84px;
+    right: 14px;
+    padding: 10px 14px 10px 12px;
+  }
+  .jarvis-greeting-card {
+    /* Clears the sticky mobile header, which is ~67px tall. */
+    top: 74px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    padding: 13px 14px 11px;
+  }
+  .jarvis-greeting-text { font-size: 12.5px; }
+  .jarvis-overlay { padding: 0; align-items: flex-end; }
+  .jarvis-panel {
+    width: 100%;
+    height: 86vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  /* The More sheet and the Jarvis button were landing on top of each other.
+     The sheet now wins outright, so the button steps out of the way. */
+  .more-sheet-backdrop { z-index: 74; }
+  .more-sheet { z-index: 75; }
+  body.more-open .jarvis-fab,
+  body.more-open .jarvis-greeting-card { display: none; }
 }
