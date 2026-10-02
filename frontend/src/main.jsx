@@ -5,7 +5,8 @@ import {
   Clock3, Coffee, LayoutDashboard, Mail, MoreHorizontal,
   Plus, Search, Settings2, Sparkles, Users, X, Zap,
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
-  Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks
+  Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks,
+  ShieldCheck, RefreshCw, GitCompare
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -454,6 +455,12 @@ function App() {
             <span className="tab-badge">{data.tasks.length}</span>
           </button>
           <button
+            className={`view-tab ${activeView === "qa" ? "active" : ""}`}
+            onClick={() => setActiveView("qa")}
+          >
+            <ShieldCheck size={16} /> Site QA
+          </button>
+          <button
             className={`view-tab completed-tab ${activeView === "completed" ? "active" : ""}`}
             onClick={() => setActiveView("completed")}
           >
@@ -461,6 +468,11 @@ function App() {
             <span className="tab-badge">{completedTasks.length}</span>
           </button>
         </div>
+
+        {/* VIEW: SITE QA BOT */}
+        {activeView === "qa" && (
+          <SiteQaView />
+        )}
 
         {/* VIEW: ALL TASKS REGISTER */}
         {activeView === "tasks" && (
@@ -1001,6 +1013,16 @@ function Sidebar({
         onClick={() => setActiveView("office")}
       >
         <Coffee size={18} /> Live Office Scene
+      </button>
+
+      <button
+        className={`nav-item ${activeView === "qa" ? "active" : ""}`}
+        onClick={() => {
+          setActiveView("qa");
+          setSelectedMember("all");
+        }}
+      >
+        <ShieldCheck size={18} /> Site QA
       </button>
 
       <button
@@ -1654,6 +1676,252 @@ const STATUS_META = {
   review: { label: "In Review", short: "Review" },
   done: { label: "Completed", short: "Done" },
 };
+
+const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
+
+function SiteQaView({ onRunCheck }) {
+  const [status, setStatus] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  async function load() {
+    try {
+      setLoading(true);
+      const [s, h] = await Promise.all([api("/api/qa/status"), api("/api/qa/history")]);
+      setStatus(s);
+      setHistory(h.runs || []);
+    } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
+      showToast(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function runNow() {
+    try {
+      setRunning(true);
+      await api("/api/qa/check", { method: "POST" });
+      await load();
+      showToast("QA check finished");
+    } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
+      showToast(e.message);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="qa-loading">
+        <div className="loader" />
+        <p>Loading QA results...</p>
+      </div>
+    );
+  }
+
+  const run = status?.run;
+  const siteUrl = status?.site_url || history.site_url;
+  const issues = [...(run?.issues || [])].sort(
+    (a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)
+  );
+
+  return (
+    <section className="qa-view">
+      <div className="section-head">
+        <div>
+          <div className="eyebrow">AUTOMATED QUALITY ASSURANCE</div>
+          <h2>Site QA</h2>
+          <p>
+            Every day this checks {siteUrl} for downtime, broken links and assets,
+            slow pages, SEO problems and accessibility gaps. Press the button to
+            run it now.
+          </p>
+        </div>
+        <div className="workspace-actions">
+          <a className="secondary-btn" href={siteUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={15} /> Open Site
+          </a>
+          <button className="primary-btn" onClick={runNow} disabled={running}>
+            <RefreshCw size={15} className={running ? "spin" : ""} />
+            {running ? "Checking..." : "Run Check Now"}
+          </button>
+        </div>
+      </div>
+
+      {!run ? (
+        <div className="qa-empty">
+          <ShieldCheck size={34} />
+          <h3>No check has run yet</h3>
+          <p>Press Run Check Now to scan the site, or wait for the daily scheduled run.</p>
+        </div>
+      ) : (
+        <>
+          <div className={`qa-hero ${run.status}`}>
+            <div className="qa-hero-left">
+              <span className={`qa-status-pill ${run.status}`}>
+                {run.status === "healthy" && "Healthy"}
+                {run.status === "warning" && "Warnings"}
+                {run.status === "critical" && "Critical"}
+              </span>
+              <h3>{run.summary}</h3>
+              <div className="qa-hero-meta">
+                <span>Checked {new Date(run.checked_at).toLocaleString()}</span>
+                <span className="dot-sep">&bull;</span>
+                <span className={`trigger-tag ${run.trigger}`}>
+                  {run.trigger === "manual" ? "Run by you" : "Scheduled"}
+                </span>
+              </div>
+            </div>
+            <div className="qa-hero-stats">
+              <div className="qa-stat">
+                <span className="qa-stat-val good">{run.homepage_status || "down"}</span>
+                <span className="qa-stat-lbl">Homepage</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val">{run.response_ms}ms</span>
+                <span className="qa-stat-lbl">Response</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val">{run.pages.length}</span>
+                <span className="qa-stat-lbl">Pages</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val">{run.assets.length}</span>
+                <span className="qa-stat-lbl">Assets</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val danger">{run.critical_count}</span>
+                <span className="qa-stat-lbl">Critical</span>
+              </div>
+              <div className="qa-stat">
+                <span className="qa-stat-val warn">{run.warning_count}</span>
+                <span className="qa-stat-lbl">Warnings</span>
+              </div>
+            </div>
+          </div>
+
+          {(run.content_added?.length > 0 || run.content_removed?.length > 0) && (
+            <div className="qa-content-change">
+              <h4><GitCompare size={15} /> Homepage copy changed since the last check</h4>
+              {run.content_added?.slice(0, 5).map((line, i) => (
+                <div key={`a${i}`} className="qa-diff added">+ {line}</div>
+              ))}
+              {run.content_removed?.slice(0, 5).map((line, i) => (
+                <div key={`r${i}`} className="qa-diff removed">- {line}</div>
+              ))}
+            </div>
+          )}
+
+          <div className="qa-panel">
+            <div className="qa-panel-head">
+              <h4>Findings ({issues.length})</h4>
+            </div>
+            {issues.length === 0 ? (
+              <div className="qa-no-issues">
+                <CheckCircle2 size={16} /> Nothing to fix. Everything passed.
+              </div>
+            ) : (
+              <div className="qa-issues">
+                {issues.map((issue, i) => (
+                  <div key={i} className={`qa-issue ${issue.severity}`}>
+                    <span className="qa-sev">{issue.severity}</span>
+                    <span className="qa-cat">{issue.category}</span>
+                    <span className="qa-msg">{issue.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="qa-columns">
+            <div className="qa-panel">
+              <div className="qa-panel-head">
+                <h4>Pages ({run.pages.length})</h4>
+              </div>
+              <table className="qa-table">
+                <thead>
+                  <tr><th>Path</th><th>Status</th><th>Time</th><th>Size</th></tr>
+                </thead>
+                <tbody>
+                  {run.pages.map(p => (
+                    <tr key={p.path}>
+                      <td>
+                        <a href={siteUrl + p.path} target="_blank" rel="noreferrer">{p.path}</a>
+                      </td>
+                      <td><span className={`qa-code ${p.status < 400 ? "ok" : "bad"}`}>{p.status}</span></td>
+                      <td className={p.ms > 3000 ? "slow" : ""}>{p.ms}ms</td>
+                      <td>{Math.round(p.bytes / 1024)} KB</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="qa-panel">
+              <div className="qa-panel-head">
+                <h4>Assets ({run.assets.length})</h4>
+                <button className="link-btn" onClick={() => setExpanded(!expanded)}>
+                  {expanded ? "Show problems only" : "Show all"}
+                </button>
+              </div>
+              <div className="qa-assets">
+                {run.assets
+                  .filter(a => expanded || a.status !== 200)
+                  .slice(0, expanded ? run.assets.length : 12)
+                  .map(a => (
+                    <div key={a.url} className="qa-asset">
+                      <span className={`qa-code ${a.status === 200 ? "ok" : "bad"}`}>{a.status}</span>
+                      <span className="qa-asset-url">{a.url}</span>
+                      <span className="qa-asset-size">{Math.round(a.bytes / 1024)} KB</span>
+                    </div>
+                  ))}
+                {run.assets.every(a => a.status === 200) && !expanded && (
+                  <div className="qa-assets-ok">All {run.assets.length} assets loaded correctly.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {history.length > 1 && (
+        <div className="qa-panel">
+          <div className="qa-panel-head">
+            <h4>Check History</h4>
+          </div>
+          <table className="qa-table">
+            <thead>
+              <tr><th>When</th><th>Status</th><th>Response</th><th>Issues</th><th>Trigger</th></tr>
+            </thead>
+            <tbody>
+              {history.map(h => (
+                <tr key={h.id}>
+                  <td>{new Date(h.checked_at).toLocaleString()}</td>
+                  <td><span className={`qa-status-pill sm ${h.status}`}>{h.status}</span></td>
+                  <td>{h.response_ms}ms</td>
+                  <td>
+                    <span className={h.critical_count ? "bad-text" : ""}>
+                      {h.critical_count} critical / {h.warning_count} warnings
+                    </span>
+                  </td>
+                  <td><span className={`trigger-tag ${h.trigger}`}>{h.trigger}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function AllTasksView({
   tasks, members, search, onSearch,

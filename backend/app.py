@@ -1,6 +1,7 @@
 import os
 import sys
 import hmac
+import json
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -122,6 +123,61 @@ class EmailLog(db.Model):
         }
 
 
+class QaRun(db.Model):
+    """One automated QA pass over the client site."""
+    id = db.Column(db.Integer, primary_key=True)
+    site_url = db.Column(db.String(300), nullable=False)
+    status = db.Column(db.String(20), default="healthy")  # healthy, warning, critical
+    summary = db.Column(db.Text, default="")
+    homepage_status = db.Column(db.Integer, default=0)
+    response_ms = db.Column(db.Integer, default=0)
+    issues = db.Column(db.Text, default="[]")       # JSON list
+    pages = db.Column(db.Text, default="[]")        # JSON list
+    assets = db.Column(db.Text, default="[]")       # JSON list
+    content_added = db.Column(db.Text, default="[]")
+    content_removed = db.Column(db.Text, default="[]")
+    content_fingerprint = db.Column(db.String(80), nullable=True)
+    checked_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Set when a scheduled run happens, cleared when a human presses the button.
+    trigger = db.Column(db.String(20), default="manual")
+
+    def to_dict(self, include_detail=True):
+        data = {
+            "id": self.id,
+            "site_url": self.site_url,
+            "status": self.status,
+            "summary": self.summary,
+            "homepage_status": self.homepage_status,
+            "response_ms": self.response_ms,
+            "issue_count": len(self._json(self.issues)),
+            "critical_count": sum(
+                1 for i in self._json(self.issues) if i.get("severity") == "critical"
+            ),
+            "warning_count": sum(
+                1 for i in self._json(self.issues) if i.get("severity") == "warning"
+            ),
+            "checked_at": self.checked_at.isoformat() if self.checked_at else None,
+            "trigger": self.trigger,
+        }
+        if include_detail:
+            data.update({
+                "issues": self._json(self.issues),
+                "pages": self._json(self.pages),
+                "assets": self._json(self.assets),
+                "content_added": self._json(self.content_added),
+                "content_removed": self._json(self.content_removed),
+            })
+        return data
+
+    @staticmethod
+    def _json(raw):
+        try:
+            value = json.loads(raw or "[]")
+            return value if isinstance(value, list) else []
+        except (ValueError, TypeError):
+            return []
+
+
 class Task(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(240), nullable=False)
@@ -176,6 +232,63 @@ from emailer import (
     send_daily_emails,
     decrypt_secret,
 )
+
+import qa_bot
+
+
+DEFAULT_QA_SITE = os.getenv("QA_SITE_URL", "https://ngocore.in").rstrip("/")
+
+
+def _latest_qa_run():
+    return QaRun.query.order_by(QaRun.checked_at.desc(), QaRun.id.desc()).first()
+
+
+def _store_qa_run(report, trigger):
+    run = QaRun(
+        site_url=report.get("site_url") or DEFAULT_QA_SITE,
+        status=report["status"],
+        summary=report["summary"],
+        homepage_status=report["homepage_status"],
+        response_ms=report["response_ms"],
+        issues=json.dumps(report["issues"]),
+        pages=json.dumps(report["pages"]),
+        assets=json.dumps(report["assets"]),
+        content_added=json.dumps(report["content_added"]),
+        content_removed=json.dumps(report["content_removed"]),
+        content_fingerprint=report.get("content_fingerprint"),
+        trigger=trigger,
+    )
+    db.session.add(run)
+    db.session.commit()
+    return run
+
+
+def _run_and_store_qa_check(trigger):
+    """Runs the full QA pass and records it. Shared by the cron and the button."""
+    previous = _latest_qa_run()
+    report = qa_bot.run_check(
+        DEFAULT_QA_SITE,
+        previous_text=None,
+        previous_fingerprint=previous.content_fingerprint if previous else None,
+    )
+    report["site_url"] = DEFAULT_QA_SITE
+
+    changed = bool(
+        previous
+        and previous.content_fingerprint
+        and report.get("content_fingerprint")
+        and previous.content_fingerprint != report["content_fingerprint"]
+    )
+    if not changed:
+        report["content_added"] = []
+        report["content_removed"] = []
+
+    report["summary"] = qa_bot.build_summary(
+        report["status"], report["issues"], report["pages"], report["assets"],
+        {"added": report["content_added"], "removed": report["content_removed"]}
+        if changed else None,
+    )
+    return _store_qa_run(report, trigger)
 
 
 # ---------------- Admin Authentication ----------------
@@ -761,6 +874,35 @@ def seed():
 
 # ---------------- Cron Endpoint (replaces the local APScheduler process) ----------------
 
+@app.get("/api/cron/qa-check")
+def cron_qa_check():
+    """
+    Scheduled QA run over the client site.
+
+    Vercel Cron sends CRON_SECRET as a Bearer token on scheduled invocations.
+    Vercel's free plan allows one cron invocation per day, which is why the
+    dashboard also has a manual trigger.
+    """
+    expected = os.getenv("CRON_SECRET", "").strip()
+    if expected:
+        provided = request.headers.get("Authorization", "").strip()
+        if provided != f"Bearer {expected}":
+            return jsonify({"error": "Unauthorized."}), 401
+    elif not request.args.get("open"):
+        return jsonify({
+            "error": "CRON_SECRET is not set. Add it as a Vercel environment variable to protect this endpoint."
+        }), 503
+
+    run = _run_and_store_qa_check("scheduled")
+    return jsonify({
+        "ok": True,
+        "message": f"QA check complete for {run.site_url}: {run.status}",
+        "status": run.status,
+        "summary": run.summary,
+        "issues": len(run.to_dict()["issues"]),
+    })
+
+
 @app.get("/api/cron/daily-emails")
 def cron_daily_emails():
     """
@@ -782,6 +924,48 @@ def cron_daily_emails():
 
     result = send_daily_emails()
     return jsonify({"ok": True, "message": "Daily task digest dispatched.", "result": result})
+
+
+# ---------------- Site QA Bot Endpoints ----------------
+
+@app.get("/api/qa/status")
+@require_admin
+def qa_status():
+    """Latest stored result. Cheap enough for the dashboard to poll."""
+    run = _latest_qa_run()
+    if not run:
+        return jsonify({
+            "has_run": False,
+            "site_url": DEFAULT_QA_SITE,
+            "message": "No QA check has run yet. Press Run Check Now.",
+        })
+    return jsonify({"has_run": True, "site_url": DEFAULT_QA_SITE, "run": run.to_dict()})
+
+
+@app.post("/api/qa/check")
+@require_admin
+def qa_check():
+    """Run a fresh check on demand, from the Run Check Now button."""
+    run = _run_and_store_qa_check("manual")
+    return jsonify({"has_run": True, "run": run.to_dict()})
+
+
+@app.get("/api/qa/history")
+@require_admin
+def qa_history():
+    """The last 30 checks, newest first."""
+    runs = QaRun.query.order_by(QaRun.checked_at.desc(), QaRun.id.desc()).limit(30).all()
+    return jsonify({
+        "site_url": DEFAULT_QA_SITE,
+        "runs": [r.to_dict(include_detail=False) for r in runs],
+    })
+
+
+@app.get("/api/qa/runs/<int:run_id>")
+@require_admin
+def qa_run_detail(run_id):
+    run = db.get_or_404(QaRun, run_id)
+    return jsonify(run.to_dict())
 
 
 # ---------------- Startup & Database Migration ----------------

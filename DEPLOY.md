@@ -51,6 +51,7 @@ In the Vercel project under **Settings > Environment Variables**, add:
 | `ADMIN_PASSWORD` | Password for the manager dashboard. Same command. Without it the dashboard is open to anyone. | Strongly recommended |
 | `CRON_SECRET` | Another random string, same command | Yes |
 | `FRONTEND_URL` | Your Vercel domain, e.g. `https://ngocore-office.vercel.app` | Yes |
+| `QA_SITE_URL` | The site the QA bot audits. Defaults to `https://ngocore.in`. | No |
 | `SMTP_HOST` | `smtp.gmail.com` | For live email |
 | `SMTP_PORT` | `587` | For live email |
 | `SMTP_USERNAME` | Your Gmail address | For live email |
@@ -110,6 +111,11 @@ curl.exe -H "Authorization: Bearer YOUR_CRON_SECRET" https://YOUR-DOMAIN.vercel.
 local timezone. Edit the `schedule` field to match; Vercel Cron only allows
 one schedule per path, and the free tier allows daily-or-more-frequent jobs,
 so once a day is the finest granularity for a specific time.
+
+**The QA bot checks `https://ngocore.in` at 06:30 UTC** by the same mechanism.
+Because the free tier allows only one scheduled invocation per day per project,
+this is why the dashboard also has a **Run Check Now** button. Change the target
+site with the `QA_SITE_URL` environment variable.
 
 **Deleting a member deletes their tasks.** That was already true locally, via
 the SQLAlchemy cascade. The UI now warns you with the task count before you

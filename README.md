@@ -32,7 +32,13 @@ A comprehensive operations management platform with real-time task assignment, a
    - **Completed work** leaves the active board and moves to a dedicated **Completed** view, grouped by team member. Anything there can be reopened with one click or deleted.
    - **Members** can be added, edited, and removed. Removing a member also removes their tasks, and the confirmation dialog tells you how many before you commit.
 
-5. **Manager Sign-In &amp; Employee Privacy**:
+5. **Site QA Bot**:
+   - Automatically audits `ngocore.in` once a day and on demand with a **Run Check Now** button.
+   - Checks uptime and response time, every internal page and every image/script/stylesheet for 404s and 5xx errors, slow pages, SEO metadata (title, meta description, canonical, Open Graph, heading structure) and accessibility gaps (missing `alt` text, unlabelled form fields, missing viewport and `lang`).
+   - Fingerprints the visible homepage copy so you can see exactly what content changed since the last run.
+   - Findings are graded **critical** / **warning** / **info**, and every check is kept in a history you can scroll back through.
+
+6. **Manager Sign-In &amp; Employee Privacy**:
    - Set `ADMIN_PASSWORD` and the manager dashboard sits behind a sign-in screen, so nobody can read your full task list by opening the URL.
    - Team members never see the dashboard. They use their own portal link and can only update the **status** and **notes** on their own tasks, never retitle, reassign, or delete them.
    - Leave `ADMIN_PASSWORD` empty to skip the sign-in screen entirely. Useful during local development.
