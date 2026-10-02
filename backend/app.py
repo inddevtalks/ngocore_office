@@ -552,23 +552,63 @@ def get_manager_name():
     return stored or os.getenv("MANAGER_NAME", "").strip()
 
 
+def _browser_location():
+    """Where the manager is, so the greeting uses their clock not the server's.
+
+    The browser sends its IANA timezone (for example Asia/Kolkata) plus its
+    current UTC offset in minutes. The saved preference wins when set, so a
+    phone that travels or a browser with a misdetected zone still gets it right.
+    """
+    saved = AppSetting.query.filter_by(key="manager_timezone").first()
+    stored_tz = (saved.value if saved else "").strip()
+    if stored_tz:
+        return stored_tz, None
+
+    tz = (request.args.get("tz") or "").strip()[:64]
+    offset = request.args.get("tzoffset")
+    try:
+        offset_minutes = float(offset) if offset not in (None, "") else None
+    except (TypeError, ValueError):
+        offset_minutes = None
+
+    # Only trust a name Python can actually resolve, so it cannot become a
+    # source of 500s from a mangled client.
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(tz)
+        except Exception:
+            tz = ""
+    return tz or None, offset_minutes
+
+
 @app.post("/api/manager/profile")
 @require_admin
 def manager_profile():
-    """Save the name Jarvis greets you by, and how it should talk to you."""
+    """Save the name Jarvis greets you by, and the timezone it should use."""
     data = request.get_json(silent=True) or {}
     # Coerce rather than trust: a non-string here would otherwise 500.
     raw = data.get("name")
     name = (raw if isinstance(raw, str) else "").strip()[:60]
 
-    row = AppSetting.query.filter_by(key="manager_name").first()
-    if row:
-        row.value = name
-    else:
-        db.session.add(AppSetting(key="manager_name", value=name))
+    tz = data.get("timezone")
+    tz = (tz if isinstance(tz, str) else "").strip()[:64]
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(tz)
+        except Exception:
+            tz = ""   # not a zone Python knows, so fall back to auto-detect
+
+    for key, value in (("manager_name", name), ("manager_timezone", tz)):
+        row = AppSetting.query.filter_by(key=key).first()
+        if row:
+            row.value = value
+        else:
+            db.session.add(AppSetting(key=key, value=value))
     db.session.commit()
 
-    return jsonify({"ok": True, "name": name})
+    return jsonify({"ok": True, "name": name, "timezone": tz})
 
 
 @app.get("/api/dashboard")
@@ -1217,6 +1257,7 @@ def jarvis_ask():
     qa_run = _latest_qa_run()
     sec_run = _latest_security_run()
 
+    timezone, offset_minutes = _browser_location()
     try:
         reply = jarvis.handle(
             message,
@@ -1225,6 +1266,8 @@ def jarvis_ask():
             qa_run.to_dict() if qa_run else None,
             sec_run.to_dict() if sec_run else None,
             manager_name=get_manager_name(),
+            timezone=timezone,
+            offset_minutes=offset_minutes,
         )
     except Exception:
         # One bad phrasing must not leave the assistant dead for the whole
@@ -1254,12 +1297,15 @@ def jarvis_greeting():
     qa_run = _latest_qa_run()
     sec_run = _latest_security_run()
 
+    timezone, offset_minutes = _browser_location()
     ctx = jarvis.build_context(
         members,
         tasks,
         qa_run.to_dict() if qa_run else None,
         sec_run.to_dict() if sec_run else None,
         manager_name=get_manager_name(),
+        timezone=timezone,
+        offset_minutes=offset_minutes,
     )
     briefing = jarvis.build_briefing(ctx)
 
@@ -1268,6 +1314,8 @@ def jarvis_greeting():
         "actions": briefing.get("actions", []),
         "suggestions": jarvis.SUGGESTIONS,
         "manager_name": ctx.get("manager_name", ""),
+        "timezone": timezone,
+        "local_time": jarvis.local_now(timezone, offset_minutes).strftime("%H:%M"),
         "capability_count": len(jarvis.INTENTS)
         + len(jarvis._task_context(""))
         + len(jarvis._person_context("")),

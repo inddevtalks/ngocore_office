@@ -68,8 +68,9 @@ function App() {
   const [taskMemberFilter, setTaskMemberFilter] = useState("all");
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
   const [securityOpen, setSecurityOpen] = useState(false);
-  // What Jarvis greets you by, editable from the Security panel.
+  // What Jarvis greets you by, and in which timezone, editable from Security.
   const [managerName, setManagerName] = useState("");
+  const [managerTimezone, setManagerTimezone] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
 
   // Tells the stylesheet that the More sheet is up, so the floating Jarvis
@@ -951,7 +952,8 @@ function App() {
         <SecurityModal
           passwordSource={authState.passwordSource}
           managerName={managerName}
-          onSaved={setManagerName}
+          managerTimezone={managerTimezone}
+          onSaved={(n, tz) => { setManagerName(n); setManagerTimezone(tz || ""); }}
           onClose={() => setSecurityOpen(false)}
         />
       )}
@@ -979,6 +981,7 @@ function App() {
         editTask={setEditingTask}
         copyPortal={copyPortalLink}
         managerName={managerName}
+        managerTimezone={managerTimezone}
       />
 
       {loading && (
@@ -1636,13 +1639,14 @@ function EditTaskModal({ task, members, onClose, onSave, onDelete }) {
   );
 }
 
-function SecurityModal({ passwordSource, managerName, onSaved, onClose }) {
+function SecurityModal({ passwordSource, managerName, managerTimezone, onSaved, onClose }) {
   const [form, setForm] = useState({
     current_password: "",
     new_password: "",
     confirm_password: "",
   });
   const [name, setName] = useState(managerName || "");
+  const [timezone, setTimezone] = useState(managerTimezone || "");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -1650,21 +1654,38 @@ function SecurityModal({ passwordSource, managerName, onSaved, onClose }) {
 
   const change = e => setForm({ ...form, [e.target.name]: e.target.value });
 
+  // The browser's own zone, offered as the default so most people never have
+  // to touch this.
+  function detectedZone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      return "";
+    }
+  }
+
   // Saved on its own so the manager does not have to re-enter their password
   // just to tell Jarvis what to call them.
   async function saveName() {
     const trimmed = name.trim();
-    if (trimmed === (managerName || "")) return;
+    const zone = timezone.trim();
+    if (trimmed === (managerName || "") && zone === (managerTimezone || "")) return;
     try {
       const res = await fetch(`${API}/api/manager/profile`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ name: trimmed }),
+        body: JSON.stringify({ name: trimmed, timezone: zone }),
       });
-      if (!res.ok) throw new Error("Could not save your name.");
-      onSaved(trimmed);
-      setResult({ ok: true, message: `Jarvis will call you ${trimmed}.` });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Could not save your details.");
+      onSaved(trimmed, json.timezone ?? zone);
+      setResult({
+        ok: true,
+        message: trimmed
+          ? `Jarvis will call you ${trimmed}.`
+          : "Saved. Jarvis will greet you without a name.",
+      });
     } catch (err) {
       setResult({ ok: false, message: err.message });
     }
@@ -1725,6 +1746,22 @@ function SecurityModal({ passwordSource, managerName, onSaved, onClose }) {
           <span className="field-hint">
             Used for the greeting when you open the office. Leave it blank and Jarvis
             just says hello without a name.
+          </span>
+        </label>
+
+        <label>
+          Timezone
+          <input
+            type="text"
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            onBlur={saveName}
+            placeholder={detectedZone() || "Asia/Kolkata"}
+          />
+          <span className="field-hint">
+            Decides whether Jarvis says good morning or good evening. Leave it blank and
+            it follows this device automatically, which is right unless you travel.
+            {detectedZone() && <> This device reports <strong>{detectedZone()}</strong>.</>}
           </span>
         </label>
 
@@ -2086,7 +2123,7 @@ function SiteQaView({ onToast, onAuthLoss }) {
   );
 }
 
-function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, editTask, copyPortal, managerName }) {
+function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, editTask, copyPortal, managerName, managerTimezone }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2110,6 +2147,24 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
   const pendingGreetingRef = useRef(null);
   const busyRef = useRef(false);
   const queueRef = useRef([]);
+  const [localTime, setLocalTime] = useState("");
+
+  // Tells the server which clock the greeting should use. The server runs in
+  // UTC, so without this it says "Good morning" at 9pm in India.
+  function tzQuery() {
+    let tz = "";
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      tz = "";
+    }
+    // getTimezoneOffset is minutes *behind* UTC, so the sign is flipped.
+    const offset = -new Date().getTimezoneOffset();
+    const params = new URLSearchParams();
+    if (tz) params.set("tz", tz);
+    params.set("tzoffset", String(offset));
+    return `?${params.toString()}`;
+  }
 
   // Chrome populates the voice list asynchronously, so getVoices() usually
   // returns nothing on the very first call. Reading it once left Jarvis on
@@ -2243,17 +2298,20 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     let cancelled = false;
     (async () => {
       try {
-        const g = await api("/api/jarvis/greeting");
+        const g = await api(`/api/jarvis/greeting${tzQuery()}`);
         if (cancelled) return;
         setSuggestions(g.suggestions || []);
         setCaps(g.capability_count || 0);
         setMessages([{ role: "jarvis", blocks: { text: g.text, actions: g.actions } }]);
         setGreeting({ text: g.text, actions: g.actions || [] });
-        // Browsers refuse to play audio until the page has been interacted
-        // with, so the greeting waits for the first tap, keypress or scroll
-        // anywhere on the page rather than only when the button is pressed.
+        setLocalTime(g.local_time || "");
         setPendingGreeting(g.text);
         pendingGreetingRef.current = g.text;
+        // Every refresh should be greeted out loud. Chrome keeps "sticky"
+        // activation per site, so after the first visit the greeting can play
+        // straight away. Try that, and fall back to the first tap if the
+        // browser refuses, rather than waiting every single time.
+        trySpeakOnArrival(g.text);
       } catch (e) {
         if (cancelled) return;
         if (e.authRequired) return onAuthLoss();
@@ -2262,7 +2320,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [managerName]);
+  }, [managerName, managerTimezone]);
 
   // Chrome, Edge and Safari all block spoken audio until the user has touched
   // the page. Listening for the very first interaction anywhere on the page is
@@ -2289,6 +2347,49 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGreeting]);
+
+  // Speaks the greeting the moment the page opens. Browsers keep activation
+  // per site, so on a refresh the greeting usually plays straight away
+  // without waiting to be tapped. If it is refused, pendingGreeting stays
+  // set and the first-tap handler above takes over.
+  function trySpeakOnArrival(text) {
+    if (!voiceOn || !ttsSupported || !text) return;
+    setTimeout(() => {
+      let started = false;
+      const probe = () => {
+        started = true;
+        pendingGreetingRef.current = null;
+        setPendingGreeting(null);
+        speak(text);
+      };
+      try {
+        // speak() only reports success through onstart, so listen for it.
+        window.speechSynthesis.addEventListener(
+          "start",
+          function onStart() {
+            window.speechSynthesis.removeEventListener("start", onStart);
+            if (!started) {
+              started = true;
+              pendingGreetingRef.current = null;
+              setPendingGreeting(null);
+            }
+          },
+          { once: true }
+        );
+        speak(text);
+      } catch {
+        // Leave pendingGreeting set so the tap fallback still works.
+        return;
+      }
+      // Nothing actually played, so put the greeting back in play.
+      setTimeout(() => {
+        if (!started) {
+          pendingGreetingRef.current = text;
+          setPendingGreeting(text);
+        }
+      }, 700);
+    }, 350);
+  }
 
   useEffect(() => {
     // Web Speech API is free and browser-native: no API key, no cost.
@@ -2440,7 +2541,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     busyRef.current = true;
     setBusy(true);
     try {
-      const reply = await api("/api/jarvis/ask", {
+      const reply = await api(`/api/jarvis/ask${tzQuery()}`, {
         method: "POST",
         body: JSON.stringify({ message }),
       });
@@ -2521,6 +2622,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
           <div className="jarvis-greeting-head">
             <span className="jarvis-greeting-orb"><Bot size={15} /></span>
             <strong>Jarvis</strong>
+            {localTime && <span className="jarvis-greeting-clock">{localTime}</span>}
           </div>
           <p className="jarvis-greeting-text">
             <JarvisBlocks blocks={greeting} onAction={runAction} />

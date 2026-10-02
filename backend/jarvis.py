@@ -13,7 +13,7 @@ can render tables and buttons alongside the text.
 """
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 STATUS_LABELS = {
     "todo": "yet to start",
@@ -725,13 +725,51 @@ def _first_name(member):
     return name.split()[0] if name else "there"
 
 
-def _part_of_day():
-    hour = datetime.utcnow().hour
+def local_now(timezone=None, offset_minutes=None):
+    """The manager's wall-clock time, not the server's.
+
+    The server runs in UTC, so greeting on utcnow() said "Morning" at 7pm in
+    India. The browser sends its IANA timezone, and its UTC offset as a
+    fallback for the rare browser that reports a zone we cannot resolve.
+    """
+    now = datetime.utcnow()
+
+    if timezone:
+        try:
+            from zoneinfo import ZoneInfo
+            return now.replace(tzinfo=dt_timezone.utc).astimezone(ZoneInfo(timezone))
+        except Exception:
+            # Unknown zone name, or a platform without the tz database.
+            pass
+
+    if offset_minutes is not None:
+        try:
+            return now + timedelta(minutes=float(offset_minutes))
+        except (TypeError, ValueError):
+            pass
+
+    return now
+
+
+def _part_of_day(timezone=None, offset_minutes=None):
+    hour = local_now(timezone, offset_minutes).hour
+    if hour < 5:
+        return "Late night"
     if hour < 12:
         return "Morning"
     if hour < 17:
         return "Afternoon"
-    return "Evening"
+    if hour < 21:
+        return "Evening"
+    return "Night"
+
+
+def _clock_note(timezone=None, offset_minutes=None):
+    """A short 'it is 7:40pm there' line, so the greeting can be checked."""
+    moment = local_now(timezone, offset_minutes)
+    suffix = "am" if moment.hour < 12 else "pm"
+    shown = moment.hour % 12 or 12
+    return f"it is {shown}:{moment.minute:02d}{suffix}"
 
 
 def _short_list(items, limit=3):
@@ -753,9 +791,9 @@ def build_briefing(ctx):
     if not members:
         return {
             "text": (
-                f"{_address(ctx)}. Nice to see you. I have got nothing to report yet "
-                "though, because there is no team set up. Add your people and I will "
-                "keep track of everything for you."
+                f"{_address(ctx)}, {_clock_note(ctx.get('timezone'), ctx.get('offset_minutes'))}. "
+                "Nice to see you. I have got nothing to report yet, though, because there "
+                "is no team set up. Add your people and I will keep track of it for you."
             ),
             "actions": [{"label": "Add your team", "action": "goto", "view": "overview"}],
         }
@@ -772,7 +810,8 @@ def build_briefing(ctx):
     if not open_tasks:
         return {
             "text": (
-                f"{_address(ctx)}. Board is completely clear, nothing open at all. "
+                f"{_address(ctx)}, {_clock_note(ctx.get('timezone'), ctx.get('offset_minutes'))}. "
+                "Board is completely clear, nothing open at all. "
                 f"You have {len(members)} {'person' if len(members) == 1 else 'people'} "
                 "and not a single thing on their plate. Rare day. Enjoy it."
             ),
@@ -815,7 +854,7 @@ def build_briefing(ctx):
         else:
             who_works.append(f"**{_first_name(m)}** has {len(mine)} lined up")
 
-    text = f"{_address(ctx)}. {lead} "
+    text = f"{_address(ctx)}, {_clock_note(ctx.get('timezone'), ctx.get('offset_minutes'))}. {lead} "
 
     if working:
         text += f"Right now {len(working)} {'task is' if len(working) == 1 else 'tasks are'} actually being worked on. "
@@ -846,10 +885,11 @@ def intent_greeting(ctx):
     return build_briefing(ctx)
 
 
-def greeting(name=None):
+def greeting(name=None, timezone=None, offset_minutes=None):
     """Fallback line when there is no workspace to read."""
+    part = _part_of_day(timezone, offset_minutes)
     who = f", {str(name).strip().split()[0]}" if name else ""
-    return f"{_part_of_day()}{who}. Good to see you. What do you want to get on with?"
+    return f"{part}{who}. Good to see you. What do you want to get on with?"
 
 
 def ask_whats_next(ctx):
@@ -971,7 +1011,8 @@ INTENTS = [
 ]
 
 
-def build_context(members, tasks, qa_run=None, security_run=None, manager_name=""):
+def build_context(members, tasks, qa_run=None, security_run=None, manager_name="",
+                  timezone=None, offset_minutes=None):
     return {
         "members": members,
         "tasks": tasks,
@@ -979,12 +1020,14 @@ def build_context(members, tasks, qa_run=None, security_run=None, manager_name="
         "qa_run": qa_run,
         "security_run": security_run,
         "manager_name": (manager_name or "").strip(),
+        "timezone": timezone,
+        "offset_minutes": offset_minutes,
     }
 
 
 def _address(ctx):
     """'Morning' or 'Morning, Peter'. Jarvis greets by the name you saved."""
-    part = _part_of_day()
+    part = _part_of_day(ctx.get("timezone"), ctx.get("offset_minutes"))
     name = (ctx.get("manager_name") or "").strip()
     return f"{part}, {name.split()[0]}" if name else part
 
@@ -1008,9 +1051,11 @@ def _dispatch(handler, ctx, text, index):
     return handler(ctx)
 
 
-def handle(message, members, tasks, qa_run=None, security_run=None, manager_name=""):
+def handle(message, members, tasks, qa_run=None, security_run=None, manager_name="",
+           timezone=None, offset_minutes=None):
     """Route one message to a handler and return a structured reply."""
-    ctx = build_context(members, tasks, qa_run, security_run, manager_name)
+    ctx = build_context(members, tasks, qa_run, security_run, manager_name,
+                        timezone, offset_minutes)
     text = (message or "").strip()
     index = ctx["index"]
 
