@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Bell, CalendarDays, CheckCircle2, ChevronDown, Circle,
@@ -6,7 +6,8 @@ import {
   Plus, Search, Settings2, Sparkles, Users, X, Zap,
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
   Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks,
-  ShieldCheck, RefreshCw, GitCompare, Download, ShieldAlert
+  ShieldCheck, RefreshCw, GitCompare, Download, ShieldAlert,
+  Bot, Mic, Square, Info, Volume2, VolumeX
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -467,6 +468,12 @@ function App() {
             <ShieldAlert size={16} /> Security
           </button>
           <button
+            className={`view-tab ${activeView === "mail" ? "active" : ""}`}
+            onClick={() => setActiveView("mail")}
+          >
+            <Mail size={16} /> Mail
+          </button>
+          <button
             className={`view-tab completed-tab ${activeView === "completed" ? "active" : ""}`}
             onClick={() => setActiveView("completed")}
           >
@@ -483,6 +490,11 @@ function App() {
         {/* VIEW: SECURITY ANALYST */}
         {activeView === "security" && (
           <SecurityView onToast={showToast} onAuthLoss={handleAuthLoss} />
+        )}
+
+        {/* VIEW: MAIL */}
+        {activeView === "mail" && (
+          <MailView onToast={showToast} onAuthLoss={handleAuthLoss} />
         )}
 
         {/* VIEW: ALL TASKS REGISTER */}
@@ -810,11 +822,11 @@ function App() {
         </button>
 
         <button
-          className="mob-nav-btn"
-          onClick={() => setModal("email_center")}
+          className={`mob-nav-btn ${activeView === "mail" ? "active" : ""}`}
+          onClick={() => setActiveView("mail")}
         >
           <Mail size={18} />
-          <span>Email</span>
+          <span>Mail</span>
         </button>
       </nav>
 
@@ -890,6 +902,16 @@ function App() {
           {toast}
         </div>
       )}
+
+      <JarvisPanel
+        onToast={showToast}
+        onAuthLoss={handleAuthLoss}
+        setActiveView={setActiveView}
+        data={data}
+        openAssign={handleOpenAssignModal}
+        editTask={setEditingTask}
+        copyPortal={copyPortalLink}
+      />
 
       {loading && (
         <div className="loading-screen">
@@ -1044,6 +1066,16 @@ function Sidebar({
         }}
       >
         <ShieldAlert size={18} /> Security Analyst
+      </button>
+
+      <button
+        className={`nav-item ${activeView === "mail" ? "active" : ""}`}
+        onClick={() => {
+          setActiveView("mail");
+          setSelectedMember("all");
+        }}
+      >
+        <Mail size={18} /> Mail
       </button>
 
       <button
@@ -1944,6 +1976,518 @@ function SiteQaView({ onToast, onAuthLoss }) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, editTask, copyPortal }) {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [caps, setCaps] = useState(0);
+  const [isOpen, setIsOpen] = useState(false);
+  const scrollRef = useRef(null);
+  const [speaking, setSpeaking] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [ttsSupported, setTtsSupported] = useState(false);
+  const [pendingGreeting, setPendingGreeting] = useState(null);
+
+  // Speech output uses the browser's own synthesis engine: no API key, no cost.
+  function speak(text) {
+    if (!voiceOn || !ttsSupported || !text) return;
+    try {
+      window.speechSynthesis.cancel();
+      const clean = String(text)
+        .replace(/\*\*/g, "")
+        .replace(/[#`>|]/g, "")
+        .slice(0, 400);
+      const utter = new SpeechSynthesisUtterance(clean);
+      utter.rate = 1.02;
+      const voices = window.speechSynthesis.getVoices();
+      const preferred =
+        voices.find(v => /en-IN/i.test(v.lang) && /female|neural/i.test(v.name)) ||
+        voices.find(v => /en-IN/i.test(v.lang)) ||
+        voices.find(v => /^en/i.test(v.lang));
+      if (preferred) utter.voice = preferred;
+      utter.onstart = () => setSpeaking(true);
+      utter.onend = () => setSpeaking(false);
+      utter.onerror = () => setSpeaking(false);
+      window.speechSynthesis.speak(utter);
+    } catch {
+      setSpeaking(false);
+    }
+  }
+
+  function stopSpeaking() {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // Nothing to cancel when synthesis is unavailable.
+    }
+    setSpeaking(false);
+  }
+
+  function toggleVoice() {
+    const next = !voiceOn;
+    setVoiceOn(next);
+    if (!next) {
+      stopSpeaking();
+      return;
+    }
+    const last = [...messages].reverse().find(m => m.role === "jarvis");
+    if (last?.blocks?.text) speak(last.blocks.text);
+  }
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const g = await api("/api/jarvis/greeting");
+        setSuggestions(g.suggestions || []);
+        setCaps(g.capability_count || 0);
+        setMessages([{ role: "jarvis", blocks: { text: g.text } }]);
+        // Browsers block speech until the page has been interacted with, so the
+        // greeting is only spoken after the first tap rather than on load.
+        setPendingGreeting(g.text);
+      } catch (e) {
+        if (e.authRequired) return onAuthLoss();
+        onToast(e.message);
+      }
+    })();
+
+    // Web Speech API is free and browser-native: no API key, no cost.
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SR) {
+      setSpeechSupported(true);
+      const recognition = new SR();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = "en-IN";
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setInput(transcript);
+        setListening(false);
+        send(transcript);
+      };
+      recognition.onerror = () => {
+        setListening(false);
+        onToast("I could not hear that. Try again, or type instead.");
+      };
+      recognition.onend = () => setListening(false);
+      recognitionRef.current = recognition;
+      setIsOpen(true);   // Opening on load means the first question can be spoken.
+      if (window.speechSynthesis) { setTtsSupported(true); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages]);
+
+  async function send(text) {
+    const message = (text ?? input).trim();
+    if (!message || busy) return;
+    setMessages(prev => [...prev, { role: "user", blocks: { text: message } }]);
+    setInput("");
+    setBusy(true);
+    try {
+      const reply = await api("/api/jarvis/ask", {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      });
+      setMessages(prev => [...prev, { role: "jarvis", blocks: reply }]);
+      speak(reply.text);
+    } catch (e) {
+      if (e.authRequired) return onAuthLoss();
+      setMessages(prev => [...prev, {
+        role: "jarvis",
+        blocks: { text: e.message, list: ["Please try that again."] },
+      }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startListening() {
+    if (!recognitionRef.current || listening) return;
+    try {
+      recognitionRef.current.start();
+      setListening(true);
+    } catch {
+      setListening(false);
+    }
+  }
+
+  function runAction(action) {
+    if (action.action === "goto" && setActiveView) setActiveView(action.view);
+    if (action.action === "open_assign" && openAssign) openAssign(action.member_id);
+    if (action.action === "edit_task" && editTask) {
+      const task = data.tasks.find(t => t.id === action.task_id);
+      if (task) editTask(task);
+    }
+    if (action.action === "copy_portal" && copyPortal) copyPortal(action.member_id);
+    if (action.action === "open_portal" && setActiveView) setActiveView("who_working");
+  }
+
+  return (
+    <>
+      <button
+        className={`jarvis-fab ${listening ? "listening" : ""} ${isOpen ? "active" : ""}`}
+        onClick={() => {
+          // First tap satisfies the browser's autoplay rule, so the greeting
+          // can finally be spoken aloud.
+          if (pendingGreeting) {
+            speak(pendingGreeting);
+            setPendingGreeting(null);
+          }
+          if (isOpen) setIsOpen(false);
+          else setIsOpen(true);
+        }}
+        title={speechSupported ? "Ask Jarvis by voice" : "Voice input not supported in this browser"}
+        aria-label="Ask Jarvis"
+      >
+        {listening ? <Square size={18} /> : <Bot size={18} />}
+        <span className="jarvis-fab-label">{listening ? "Listening..." : "Jarvis"}</span>
+      </button>
+
+      {isOpen && (
+        <div className="jarvis-overlay" onMouseDown={() => setIsOpen(false)}>
+          <div className="jarvis-panel" onMouseDown={e => e.stopPropagation()}>
+            <div className="jarvis-head">
+              <div className="jarvis-head-left">
+                <div className="jarvis-orb"><Bot size={18} /></div>
+                <div>
+                  <strong>JARVIS</strong>
+                  <span>{caps || 27} capabilities &middot; answers from your live data</span>
+                </div>
+              </div>
+              <div className="jarvis-head-right">
+                {speechSupported && (
+                  <button
+                    className={`jarvis-mic ${listening ? "on" : ""}`}
+                    onClick={startListening}
+                    title="Speak instead of typing"
+                  >
+                    {listening ? <Square size={15} /> : <Mic size={15} />}
+                  </button>
+                )}
+                {ttsSupported && (
+                  <button
+                    className={`jarvis-mic ${speaking ? "on" : ""}`}
+                    onClick={() => (speaking ? stopSpeaking() : toggleVoice())}
+                    title={voiceOn ? "Jarvis speaks replies. Click to mute." : "Jarvis is muted. Click to unmute."}
+                  >
+                    {voiceOn ? <Volume2 size={15} /> : <VolumeX size={15} />}
+                  </button>
+                )}
+                <button className="close-btn" onClick={() => setIsOpen(false)}><X size={17} /></button>
+              </div>
+            </div>
+
+            <div className="jarvis-log" ref={scrollRef}>
+              {messages.map((m, i) => (
+                <div key={i} className={`jarvis-msg ${m.role}`}>
+                  {m.role === "jarvis" && <div className="jarvis-msg-orb"><Bot size={13} /></div>}
+                  <div className="jarvis-bubble">
+                    <JarvisBlocks blocks={m.blocks} onAction={runAction} />
+                  </div>
+                </div>
+              ))}
+              {busy && (
+                <div className="jarvis-msg jarvis">
+                  <div className="jarvis-msg-orb"><Bot size={13} /></div>
+                  <div className="jarvis-bubble typing"><span /><span /><span /></div>
+                </div>
+              )}
+            </div>
+
+            {suggestions.length > 0 && messages.length <= 1 && (
+              <div className="jarvis-suggestions">
+                {suggestions.map(s => (
+                  <button key={s} onClick={() => send(s)}>{s}</button>
+                ))}
+              </div>
+            )}
+
+            <form
+              className="jarvis-input"
+              onSubmit={e => { e.preventDefault(); send(); }}
+            >
+              <input
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                placeholder={listening ? "Listening..." : "Ask Jarvis, or press the mic to speak"}
+                disabled={busy}
+              />
+              {speechSupported && (
+                <button type="button" onClick={startListening} className={listening ? "on" : ""} title="Speak">
+                  {listening ? <Square size={16} /> : <Mic size={16} />}
+                </button>
+              )}
+              <button type="submit" className="jarvis-send" disabled={busy || !input.trim()} title="Send">
+                <Send size={16} />
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function JarvisBlocks({ blocks, onAction }) {
+  if (!blocks) return null;
+
+  function inline(text) {
+    // Minimal markdown: **bold** only, which is all the backend emits.
+    return String(text || "")
+      .split(/(\*\*[^*]+\*\*)/g)
+      .map((part, i) =>
+        part.startsWith("**") && part.endsWith("**")
+          ? <b key={i}>{part.slice(2, -2)}</b>
+          : <span key={i}>{part}</span>
+      );
+  }
+
+  return (
+    <>
+      <p className="jarvis-text">{inline(blocks.text)}</p>
+      {blocks.text2 && <p className="jarvis-text dim">{inline(blocks.text2)}</p>}
+
+      {blocks.stats && (
+        <div className="jarvis-stats">
+          {blocks.stats.map(s => (
+            <div key={s.label}>
+              <strong>{s.value}</strong>
+              <span>{s.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {blocks.table && (
+        <div className="jarvis-table-wrap">
+          {blocks.table.map((row, i) => (
+            <div key={i} className={`jarvis-tr ${i === 0 || i === 1 ? "head" : ""}`}>
+              {row.split("|").filter(c => c.trim()).map((cell, j) => (
+                <span key={j}>{inline(cell.trim())}</span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {blocks.list && (
+        <ul className="jarvis-list">
+          {blocks.list.map((line, i) => (
+            <li key={i}>{inline(line)}</li>
+          ))}
+        </ul>
+      )}
+
+      {blocks.actions && blocks.actions.length > 0 && (
+        <div className="jarvis-actions">
+          {blocks.actions.map((a, i) => (
+            <button
+              key={i}
+              onClick={() => (a.message ? send(a.message) : onAction(a))}
+              title={a.message || ""}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function MailView({ onToast, onAuthLoss }) {
+  const [status, setStatus] = useState({ configured: false, connected: false, missing_env: [] });
+  const [messages, setMessages] = useState([]);
+  const [source, setSource] = useState("outbox");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(null);
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mail") === "connected") {
+      setNotice("Gmail connected successfully.");
+      params.delete("mail");
+      params.delete("account");
+      window.history.pushState({}, "", `${window.location.pathname}${params.toString()}`);
+    }
+  }, []);
+
+  async function load(query = "") {
+    try {
+      setLoading(true);
+      const [s, m] = await Promise.all([
+        api("/api/mail/status"),
+        api(`/api/mail/messages${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+      ]);
+      setStatus(s);
+      setMessages(m.messages || []);
+      setSource(m.source);
+      if (m.message) setNotice(m.message);
+    } catch (e) {
+      if (e.authRequired) return onAuthLoss();
+      if (e.needsReconnect || /reconnect/i.test(e.message)) setNotice(e.message);
+      else onToast(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function openMessage(m) {
+    setOpen({ id: m.id, loading: true });
+    try {
+      const full = await api(`/api/mail/messages/${m.id}`);
+      setOpen(full);
+    } catch (e) {
+      if (e.authRequired) return onAuthLoss();
+      setOpen({ error: e.message });
+    }
+  }
+
+  async function disconnect() {
+    try {
+      await api("/api/mail/disconnect", { method: "POST" });
+      await load();
+      onToast("Gmail disconnected");
+    } catch (e) {
+      onToast(e.message);
+    }
+  }
+
+  return (
+    <section className="mail-view">
+      <div className="section-head">
+        <div>
+          <div className="eyebrow">MAIL</div>
+          <h2>Mail</h2>
+          <p>
+            {status.connected
+              ? `Reading ${status.email} directly, so you do not need to open Gmail.`
+              : "Read the notifications this system sends. Connect Gmail to see your real inbox here too."}
+          </p>
+        </div>
+        <div className="workspace-actions">
+          <div className="search">
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && load(search)}
+              placeholder="Search mail..."
+            />
+          </div>
+          <button className="secondary-btn" onClick={() => load(search)}>
+            <RefreshCw size={15} /> Refresh
+          </button>
+          {status.connected ? (
+            <button className="secondary-btn danger-outline" onClick={disconnect}>
+              Disconnect
+            </button>
+          ) : (
+            <a className="primary-btn" href="/api/mail/auth/start">
+              <Mail size={15} /> Connect Gmail
+            </a>
+          )}
+        </div>
+      </div>
+
+      {!status.configured && (
+        <div className="mail-setup">
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Gmail is not set up yet</strong>
+            <p>
+              Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> as
+              environment variables, then press Connect Gmail. Until then you can
+              still read every notification this system has sent.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {notice && (
+        <div className="mail-notice"><Info size={15} /> {notice}</div>
+      )}
+
+      <div className="mail-source-tag">
+        Showing <b>{source === "gmail" ? "your Gmail inbox" : "sent notifications"}</b>
+        {" "}({messages.length})
+      </div>
+
+      {loading ? (
+        <div className="qa-loading"><div className="loader" /><p>Loading mail...</p></div>
+      ) : messages.length === 0 ? (
+        <div className="qa-empty">
+          <Mail size={34} />
+          <h3>No mail to show</h3>
+          <p>
+            {source === "gmail"
+              ? "Your inbox has no matching messages."
+              : "Nothing has been sent yet. Assign a task and the notification will appear here."}
+          </p>
+        </div>
+      ) : (
+        <div className="mail-list">
+          {messages.map(m => (
+            <button key={m.id} className="mail-row" onClick={() => openMessage(m)}>
+              <div className={`mail-dot ${m.unread ? "unread" : ""}`} />
+              <div className="mail-row-main">
+                <strong>{m.subject}</strong>
+                <span className="mail-from">{m.from}</span>
+                <span className="mail-snippet">{m.snippet}</span>
+              </div>
+              <div className="mail-row-meta">
+                {m.status && m.status !== "sent" && (
+                  <span className={`mail-status ${m.status}`}>{m.status}</span>
+                )}
+                <span className="mail-date">{m.date ? new Date(m.date).toLocaleString() : ""}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {open && (
+        <div className="mail-reader" onMouseDown={() => setOpen(null)}>
+          <div className="mail-reader-card" onMouseDown={e => e.stopPropagation()}>
+            <div className="mail-reader-head">
+              <div>
+                <strong>{open.subject || (open.loading ? "Loading..." : "")}</strong>
+                <div className="mail-reader-meta">
+                  {open.from} {open.to && <>&bull; to {open.to}</>}
+                  {open.date && <>&bull; {new Date(open.date).toLocaleString()}</>}
+                </div>
+              </div>
+              <button className="close-btn" onClick={() => setOpen(null)}><X size={17} /></button>
+            </div>
+            <div className="mail-reader-body">
+              {open.loading && <div className="loader" />}
+              {open.error && <p className="bad-text">{open.error}</p>}
+              {open.body && (
+                open.body.trim().startsWith("<")
+                  ? <div className="email-html-render" dangerouslySetInnerHTML={{ __html: open.body }} />
+                  : <pre className="mail-text">{open.body}</pre>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </section>

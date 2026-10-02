@@ -294,6 +294,9 @@ from emailer import (
 import qa_bot
 import security_bot
 import report_pdf
+import jarvis
+import gmail_service
+from flask import redirect
 
 
 DEFAULT_QA_SITE = os.getenv("QA_SITE_URL", "https://ngocore.in").rstrip("/")
@@ -1163,6 +1166,155 @@ def security_report_pdf():
         as_attachment=True,
         download_name=f"security-review-{stamp}.pdf",
     )
+
+
+# ---------------- Jarvis Assistant ----------------
+
+@app.post("/api/jarvis/ask")
+@require_admin
+def jarvis_ask():
+    """
+    Answers one message from live workspace data.
+
+    The reply is assembled by rule, not generated, so it cannot invent facts
+    about the team. Email sending is deliberately not offered here: the
+    suggestions point at surfaces where the manager can review first.
+    """
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Say something first."}), 400
+
+    members = TeamMember.query.order_by(TeamMember.id).all()
+    tasks = Task.query.order_by(Task.position.asc(), Task.created_at.desc()).all()
+
+    qa_run = _latest_qa_run()
+    sec_run = _latest_security_run()
+
+    reply = jarvis.handle(
+        message,
+        members,
+        tasks,
+        qa_run.to_dict() if qa_run else None,
+        sec_run.to_dict() if sec_run else None,
+    )
+    reply["asked"] = message
+    return jsonify(reply)
+
+
+@app.get("/api/jarvis/greeting")
+@require_admin
+def jarvis_greeting():
+    return jsonify({
+        "text": jarvis.greeting(),
+        "suggestions": jarvis.SUGGESTIONS,
+        "capability_count": len(jarvis.INTENTS)
+        + len(jarvis._task_context(""))
+        + len(jarvis._person_context("")),
+    })
+
+
+# ---------------- Mail (Gmail) ----------------
+
+@app.get("/api/mail/status")
+@require_admin
+def mail_status():
+    status = gmail_service.connection_status()
+    # Outbox works with no Gmail setup at all, so the page is never empty.
+    status["outbox_count"] = len(gmail_service.sent_notifications(limit=100))
+    return jsonify(status)
+
+
+@app.get("/api/mail/auth/start")
+@require_admin
+def mail_auth_start():
+    """Redirects the manager to Google's consent screen."""
+    try:
+        return redirect(gmail_service.auth_url(), code=302)
+    except gmail_service.GmailNotConfigured as e:
+        return jsonify({"error": str(e)}), 503
+
+
+@app.get("/api/mail/auth/callback")
+def mail_auth_callback():
+    """Google sends the user back here with an authorisation code."""
+    if request.args.get("error"):
+        return jsonify({
+            "error": "You declined the Gmail connection.",
+            "detail": request.args.get("error_description", ""),
+        }), 400
+
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "Google did not return an authorisation code."}), 400
+
+    try:
+        result = gmail_service.exchange_code(code)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    frontend = os.getenv("FRONTEND_URL", "").rstrip("/")
+    # Bounce the user back to the app with a marker the UI can read.
+    return redirect(f"{frontend}/?mail=connected&account={result['email']}", code=302)
+
+
+@app.post("/api/mail/disconnect")
+@require_admin
+def mail_disconnect():
+    gmail_service.disconnect()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/mail/messages")
+@require_admin
+def mail_messages():
+    query = request.args.get("q", "").strip()
+    try:
+        if not gmail_service.is_configured() or not gmail_service.connection_status()["connected"]:
+            return jsonify({
+                "messages": gmail_service.sent_notifications(limit=30),
+                "source": "outbox",
+                "message": "Gmail is not connected yet, so this is the mail this "
+                           "system has sent. Connect Gmail to see your inbox.",
+            })
+        return jsonify({
+            "messages": gmail_service.list_messages(query=query),
+            "source": "gmail",
+        })
+    except PermissionError as e:
+        return jsonify({"error": str(e), "needs_reconnect": True}), 401
+    except Exception as e:
+        print(f"[MAIL LIST ERROR] {e}")
+        return jsonify({"error": str(e)[:160]}), 502
+
+
+@app.get("/api/mail/messages/<message_id>")
+@require_admin
+def mail_message_detail(message_id):
+    # Outbox entries are previews, not Gmail messages.
+    if message_id.startswith("outbox-"):
+        from emailer import get_outbox
+        raw_id = message_id.split("-", 1)[1]
+        for entry in get_outbox(limit=200):
+            if str(entry.get("id")) == raw_id:
+                return jsonify({
+                    "id": message_id,
+                    "from": "Office Task Hub",
+                    "to": entry.get("to"),
+                    "subject": entry.get("subject"),
+                    "date": entry.get("timestamp"),
+                    "body": entry.get("body_html") or entry.get("body_text"),
+                    "source": "outbox",
+                })
+        return jsonify({"error": "That notification is no longer available."}), 404
+
+    try:
+        return jsonify(gmail_service.read_message(message_id))
+    except PermissionError as e:
+        return jsonify({"error": str(e), "needs_reconnect": True}), 401
+    except Exception as e:
+        print(f"[MAIL READ ERROR] {e}")
+        return jsonify({"error": str(e)[:160]}), 502
 
 
 # ---------------- Startup & Database Migration ----------------
