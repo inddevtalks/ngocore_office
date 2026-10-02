@@ -27,6 +27,16 @@ A comprehensive operations management platform with real-time task assignment, a
    - Shows current focus spotlight, queued tasks, and completed counts.
    - Actions to reassign, assign new tasks, resend email notifications, or open an employee portal preview.
 
+4. **Full Task & Member Management**:
+   - **Tasks** can be created, edited, reassigned to a different team member, and deleted. Reassigning optionally emails the new assignee automatically.
+   - **Completed work** leaves the active board and moves to a dedicated **Completed** view, grouped by team member. Anything there can be reopened with one click or deleted.
+   - **Members** can be added, edited, and removed. Removing a member also removes their tasks, and the confirmation dialog tells you how many before you commit.
+
+5. **Manager Sign-In &amp; Employee Privacy**:
+   - Set `ADMIN_PASSWORD` and the manager dashboard sits behind a sign-in screen, so nobody can read your full task list by opening the URL.
+   - Team members never see the dashboard. They use their own portal link and can only update the **status** and **notes** on their own tasks, never retitle, reassign, or delete them.
+   - Leave `ADMIN_PASSWORD` empty to skip the sign-in screen entirely. Useful during local development.
+
 4. **High-Clarity Animated Virtual Office**:
    - Crystal-clear visual office environment with distinct zones:
      - 🖥️ **Workstations Pods**: Dual glowing LED monitors displaying animated scrolling code and charts with screen glow reflections, keyboards, and ergonomic chairs.

@@ -5,7 +5,7 @@ import {
   Clock3, Coffee, LayoutDashboard, Mail, MoreHorizontal,
   Plus, Search, Settings2, Sparkles, Users, X, Zap,
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
-  Pencil, Trash2, AlertTriangle, UserX
+  Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -22,8 +22,19 @@ const API = import.meta.env.VITE_API_URL || "";
 async function api(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    credentials: "same-origin",
     ...options,
   });
+
+  if (res.status === 401) {
+    const data = await res.json().catch(() => ({}));
+    if (data.auth_required) {
+      const err = new Error(data.error || "Manager sign-in required.");
+      err.authRequired = true;
+      throw err;
+    }
+  }
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Something went wrong");
   return data;
@@ -32,33 +43,88 @@ async function api(path, options = {}) {
 function App() {
   const [data, setData] = useState({ members: [], tasks: [], stats: {}, smtp_status: {} });
   const [loading, setLoading] = useState(true);
-  const [activeView, setActiveView] = useState("overview"); // 'overview', 'who_working', 'office'
+  const [authState, setAuthState] = useState({ checked: false, enabled: false, authenticated: false });
+  const [activeView, setActiveView] = useState("overview"); // 'overview', 'who_working', 'office', 'completed'
   const [selectedMember, setSelectedMember] = useState("all");
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState(null); // 'task', 'member', 'email_center'
   const [editingMember, setEditingMember] = useState(null);
   const [deletingMember, setDeletingMember] = useState(null);
+  const [editingTask, setEditingTask] = useState(null);
+  const [portalTask, setPortalTask] = useState(null);
   const [prefilledMemberId, setPrefilledMemberId] = useState(null);
   const [toast, setToast] = useState("");
-  const [portalMemberId, setPortalMemberId] = useState(null);
+  // Read during the first render, not in an effect. Otherwise an employee
+  // following their own link sees a flash of the manager sign-in screen
+  // before the portal takes over.
+  const [portalMemberId, setPortalMemberId] = useState(
+    () => new URLSearchParams(window.location.search).get("portal")
+  );
+  // True when the manager opened a portal from the dashboard rather than an
+  // employee following their own share link.
+  const [portalPreview, setPortalPreview] = useState(false);
   const [mobileKanbanStatus, setMobileKanbanStatus] = useState("all"); // 'all', 'todo', 'in_progress', 'review', 'done'
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Check URL query parameters for employee portal link: ?portal=123
+  // Employees arriving on ?portal=<id> never need the manager dashboard, so
+  // skip the auth check entirely for them.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const portalId = params.get("portal");
-    if (portalId) {
-      setPortalMemberId(portalId);
+    if (portalMemberId) return;
+    load();
+  }, [portalMemberId]);
+
+  function openPortalPreview(id) {
+    setPortalMemberId(String(id));
+    setPortalPreview(true);
+  }
+
+  function closePortal() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("portal");
+    window.history.pushState({}, "", url.toString());
+    setPortalMemberId(null);
+    setPortalPreview(false);
+  }
+
+  async function checkAuth() {
+    try {
+      const res = await fetch(`${API}/api/auth/status`, {
+        credentials: "same-origin",
+      });
+      const json = await res.json();
+      setAuthState({ checked: true, enabled: !!json.enabled, authenticated: !!json.authenticated });
+
+      // When auth is switched off entirely (local dev), treat as signed in so
+      // the sign-in screen never appears for a setup that has no password.
+      if (!json.enabled) {
+        setAuthState({ checked: true, enabled: false, authenticated: true });
+      }
+      return json.authenticated || !json.enabled;
+    } catch {
+      setAuthState({ checked: true, enabled: true, authenticated: false });
+      return false;
     }
-  }, []);
+  }
 
   async function load() {
+    // A portal visitor is never the manager, so don't demand a sign-in.
+    const ok = portalMemberId ? false : await checkAuth();
+    if (!ok) {
+      if (portalMemberId) {
+        // Portal members never load the dashboard payload.
+        setLoading(false);
+      }
+      return;
+    }
     try {
       setLoading(true);
       const dashboard = await api("/api/dashboard");
       setData(dashboard);
     } catch (e) {
+      if (e.authRequired) {
+        setAuthState(prev => ({ ...prev, authenticated: false }));
+        return;
+      }
       setToast(e.message);
     } finally {
       setLoading(false);
@@ -79,14 +145,31 @@ function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // Done tasks live in their own view, so the working board shows only live work.
+  const completedTasks = useMemo(
+    () => data.tasks.filter(t => t.status === "done"),
+    [data.tasks]
+  );
+
+  const activeTasks = useMemo(
+    () => data.tasks.filter(t => t.status !== "done"),
+    [data.tasks]
+  );
+
   const filteredTasks = useMemo(() => {
-    return data.tasks.filter(t => {
+    return activeTasks.filter(t => {
       const memberOk = selectedMember === "all" || String(t.member_id) === String(selectedMember);
       const searchOk = !search || `${t.title} ${t.description} ${t.member_name}`.toLowerCase().includes(search.toLowerCase());
       const statusOk = mobileKanbanStatus === "all" || t.status === mobileKanbanStatus;
       return memberOk && searchOk && statusOk;
     });
-  }, [data.tasks, selectedMember, search, mobileKanbanStatus]);
+  }, [activeTasks, selectedMember, search, mobileKanbanStatus]);
+
+  // Any 401 from a manager endpoint drops straight back to the sign-in screen
+  // instead of showing a raw error.
+  function handleAuthLoss() {
+    setAuthState(prev => ({ ...prev, authenticated: false }));
+  }
 
   async function updateTask(id, patch) {
     try {
@@ -94,8 +177,19 @@ function App() {
       await load();
       showToast("Task updated");
     } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
       showToast(e.message);
     }
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "same-origin" });
+    } catch {
+      // Even if the call fails, clear local state so the UI locks.
+    }
+    setAuthState({ checked: true, enabled: true, authenticated: false });
+    setData({ members: [], tasks: [], stats: {}, smtp_status: {} });
   }
 
   async function createTask(payload) {
@@ -107,6 +201,7 @@ function App() {
       const emailNotice = res.email_result?.message ? ` & ${res.email_result.message}` : "";
       showToast(`Task assigned successfully${emailNotice}`);
     } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
       showToast(e.message);
     }
   }
@@ -132,6 +227,37 @@ function App() {
       showToast("Member details updated!");
     } catch (e) {
       showToast(e.message);
+    }
+  }
+
+  async function deleteTask(taskId) {
+    try {
+      await api(`/api/tasks/${taskId}`, { method: "DELETE" });
+      await load();
+      if (portalTask) setPortalTask(null);
+      showToast("Task deleted");
+    } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
+      showToast(e.message);
+    }
+  }
+
+  async function updateTaskFull(taskId, payload) {
+    try {
+      const res = await api(`/api/tasks/${taskId}`, { method: "PUT", body: JSON.stringify(payload) });
+      await load();
+      setEditingTask(null);
+      const emailNotice = res.email_result?.message ? ` & ${res.email_result.message}` : "";
+      showToast(
+        res.reassigned
+          ? `Task reassigned to ${res.member_name}${emailNotice}`
+          : "Task updated"
+      );
+      return res;
+    } catch (e) {
+      if (e.authRequired) return handleAuthLoss();
+      showToast(e.message);
+      return null;
     }
   }
 
@@ -193,17 +319,25 @@ function App() {
     return (
       <MemberPortal
         memberId={portalMemberId}
-        onBackToManager={() => {
-          const url = new URL(window.location.href);
-          url.searchParams.delete("portal");
-          window.history.pushState({}, "", url.toString());
-          setPortalMemberId(null);
-        }}
+        previewMode={portalPreview}
+        onBackToManager={closePortal}
       />
     );
   }
 
-  const activeTasks = filteredTasks.filter(t => t.status !== "done");
+  // Manager sign-in gate. Employee portal links above stay reachable without it.
+  if (!authState.authenticated && !portalMemberId) {
+    return (
+      <LoginScreen
+        enabled={authState.enabled}
+        checked={authState.checked}
+        onSuccess={() => {
+          setAuthState(prev => ({ ...prev, authenticated: true }));
+          load();
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -218,6 +352,7 @@ function App() {
         onEditMember={handleOpenEditMember}
         onDeleteMember={setDeletingMember}
         onOpenEmailCenter={() => setModal("email_center")}
+        onLogout={authState.enabled ? logout : null}
         smtpStatus={data.smtp_status}
       />
 
@@ -300,7 +435,28 @@ function App() {
           >
             <Coffee size={16} /> Virtual Animated Office
           </button>
+          <button
+            className={`view-tab completed-tab ${activeView === "completed" ? "active" : ""}`}
+            onClick={() => setActiveView("completed")}
+          >
+            <CheckCircle2 size={16} /> Completed
+            <span className="tab-badge">{completedTasks.length}</span>
+          </button>
         </div>
+
+        {/* VIEW: COMPLETED TASKS */}
+        {activeView === "completed" && (
+          <CompletedView
+            tasks={completedTasks}
+            search={search}
+            onSearch={setSearch}
+            onEdit={setEditingTask}
+            onDelete={setPortalTask}
+            onRestore={(t) => updateTask(t.id, { status: "todo" })}
+            onCopyPortalLink={copyPortalLink}
+            onResendEmail={resendEmailNotification}
+          />
+        )}
 
         {/* VIEW 1: WHO IS WORKING ON WHAT */}
         {activeView === "who_working" && (
@@ -308,7 +464,7 @@ function App() {
             members={data.members}
             tasks={data.tasks}
             onAssignTask={handleOpenAssignModal}
-            onOpenPortal={(id) => setPortalMemberId(String(id))}
+            onOpenPortal={openPortalPreview}
             onResendEmail={resendEmailNotification}
             onEditMember={handleOpenEditMember}
             onDeleteMember={setDeletingMember}
@@ -434,10 +590,10 @@ function App() {
                   🔍 Review ({data.stats.review || 0})
                 </button>
                 <button
-                  className={`m-ktab done ${mobileKanbanStatus === "done" ? "active" : ""}`}
-                  onClick={() => setMobileKanbanStatus("done")}
+                  className={`m-ktab done ${activeView === "completed" ? "active" : ""}`}
+                  onClick={() => setActiveView("completed")}
                 >
-                  ✓ Done ({data.stats.done || 0})
+                  ✓ Done ({completedTasks.length})
                 </button>
               </div>
 
@@ -446,10 +602,7 @@ function App() {
                   ["todo", "Next up", "Waiting to start"],
                   ["in_progress", "Doing now", "Active execution"],
                   ["review", "Review", "Needs boss approval"],
-                  ["done", "Done", "Shipped today"],
-                ]
-                  .filter(([status]) => mobileKanbanStatus === "all" || mobileKanbanStatus === status)
-                  .map(([status, title, desc]) => (
+                ].map(([status, title, desc]) => (
                     <KanbanColumn
                       key={status}
                       status={status}
@@ -459,6 +612,8 @@ function App() {
                       onUpdate={updateTask}
                       onResendEmail={resendEmailNotification}
                       onCopyPortalLink={copyPortalLink}
+                      onEdit={setEditingTask}
+                      onDelete={setPortalTask}
                     />
                   ))}
               </div>
@@ -507,7 +662,7 @@ function App() {
                         <button
                           className="portal-preview-btn"
                           title="Preview member dashboard"
-                          onClick={() => setPortalMemberId(String(member.id))}
+                          onClick={() => openPortalPreview(member.id)}
                         >
                           <ExternalLink size={13} /> Open
                         </button>
@@ -634,6 +789,27 @@ function App() {
         />
       )}
 
+      {editingTask && (
+        <EditTaskModal
+          task={editingTask}
+          members={data.members}
+          onClose={() => setEditingTask(null)}
+          onSave={updateTaskFull}
+          onDelete={(t) => {
+            setEditingTask(null);
+            setPortalTask(t);
+          }}
+        />
+      )}
+
+      {portalTask && (
+        <DeleteTaskModal
+          task={portalTask}
+          onClose={() => setPortalTask(null)}
+          onConfirm={() => deleteTask(portalTask.id)}
+        />
+      )}
+
       {modal === "email_center" && (
         <EmailCenterModal
           onClose={() => setModal(null)}
@@ -658,6 +834,82 @@ function App() {
   );
 }
 
+function LoginScreen({ enabled, checked, onSuccess }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${API}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ password }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json.error || "Sign-in failed.");
+        return;
+      }
+      onSuccess();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="login-shell">
+      <form className="login-card" onSubmit={submit}>
+        <div className="login-brand">
+          <div className="brand-mark"><Zap size={22} /></div>
+          <strong>NGOCORE OFFICE</strong>
+          <span>MANAGER SIGN-IN</span>
+        </div>
+
+        <h1>Operations Control Room</h1>
+        <p className="login-sub">
+          This dashboard holds your full team and task list. Enter the manager password to continue.
+        </p>
+
+        <label>
+          Manager Password
+          <input
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Enter your password"
+            autoFocus
+            required
+          />
+        </label>
+
+        {error && <div className="login-error">{error}</div>}
+
+        <button className="primary-btn full" type="submit" disabled={busy}>
+          <Shield size={16} /> {busy ? "Signing in..." : "Unlock Dashboard"}
+        </button>
+
+        <p className="login-hint">
+          Team members do not need this. They use their own portal link, which looks like{" "}
+          <code>?portal=1</code>.
+        </p>
+
+        {!enabled && checked && (
+          <p className="login-note">
+            No ADMIN_PASSWORD is configured, so sign-in is currently disabled.
+          </p>
+        )}
+      </form>
+    </div>
+  );
+}
+
 function Sidebar({
   activeView,
   setActiveView,
@@ -668,6 +920,7 @@ function Sidebar({
   onEditMember,
   onDeleteMember,
   onOpenEmailCenter,
+  onLogout,
   smtpStatus
 }) {
   return (
@@ -703,6 +956,16 @@ function Sidebar({
         onClick={() => setActiveView("office")}
       >
         <Coffee size={18} /> Live Office Scene
+      </button>
+
+      <button
+        className={`nav-item ${activeView === "completed" ? "active" : ""}`}
+        onClick={() => {
+          setActiveView("completed");
+          setSelectedMember("all");
+        }}
+      >
+        <CheckCircle2 size={18} /> Completed Tasks
       </button>
 
       <button
@@ -762,6 +1025,11 @@ function Sidebar({
         <button className="nav-item" onClick={onOpenEmailCenter}>
           <Settings2 size={18} /> Email & Settings
         </button>
+        {onLogout && (
+          <button className="nav-item" onClick={onLogout} title="Sign out of the manager dashboard">
+            <LogOut size={18} /> Sign Out
+          </button>
+        )}
         <div className="secure">
           <span /> System operational
         </div>
@@ -782,7 +1050,10 @@ function Metric({ icon, label, value, suffix }) {
   );
 }
 
-function KanbanColumn({ status, title, desc, tasks, onUpdate, onResendEmail, onCopyPortalLink }) {
+function KanbanColumn({
+  status, title, desc, tasks,
+  onUpdate, onResendEmail, onCopyPortalLink, onEdit, onDelete
+}) {
   return (
     <div className={`kanban-column ${status}`}>
       <div className="column-head">
@@ -803,6 +1074,8 @@ function KanbanColumn({ status, title, desc, tasks, onUpdate, onResendEmail, onC
             onUpdate={onUpdate}
             onResendEmail={onResendEmail}
             onCopyPortalLink={onCopyPortalLink}
+            onEdit={onEdit}
+            onDelete={onDelete}
           />
         ))}
       </div>
@@ -810,19 +1083,39 @@ function KanbanColumn({ status, title, desc, tasks, onUpdate, onResendEmail, onC
   );
 }
 
-function TaskCard({ task, onUpdate, onResendEmail, onCopyPortalLink }) {
-  const next = { todo: "in_progress", in_progress: "review", review: "done", done: "todo" }[task.status];
+function TaskCard({ task, onUpdate, onResendEmail, onCopyPortalLink, onEdit, onDelete }) {
+  const next = { todo: "in_progress", in_progress: "review", review: "done" }[task.status];
   return (
     <div className="task-card">
       <div className="task-card-top">
         <span className={`priority ${task.priority}`}>{task.priority}</span>
-        <button
-          className="task-email-btn"
-          title="Resend assignment email notification"
-          onClick={() => onResendEmail(task.id)}
-        >
-          <Mail size={13} />
-        </button>
+        <span className="task-card-tools">
+          {onEdit && (
+            <button
+              className="task-tool-btn"
+              title="Edit this task"
+              onClick={() => onEdit(task)}
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              className="task-tool-btn danger"
+              title="Delete this task"
+              onClick={() => onDelete(task)}
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+          <button
+            className="task-email-btn"
+            title="Resend assignment email notification"
+            onClick={() => onResendEmail(task.id)}
+          >
+            <Mail size={13} />
+          </button>
+        </span>
       </div>
 
       <h4>{task.title}</h4>
@@ -846,11 +1139,7 @@ function TaskCard({ task, onUpdate, onResendEmail, onCopyPortalLink }) {
       </div>
 
       <button className="status-action" onClick={() => onUpdate(task.id, { status: next })}>
-        {task.status === "done" ? (
-          <><Circle size={14} /> Reopen</>
-        ) : (
-          <><ChevronDown size={14} /> Move to {next.replace("_", " ")}</>
-        )}
+        <ChevronDown size={14} /> Move to {next.replace("_", " ")}
       </button>
     </div>
   );
@@ -1014,6 +1303,260 @@ function MemberModal({ member, onClose, onSave }) {
         </button>
       </form>
     </Modal>
+  );
+}
+
+function EditTaskModal({ task, members, onClose, onSave, onDelete }) {
+  const [form, setForm] = useState({
+    title: task.title || "",
+    description: task.description || "",
+    member_id: task.member_id,
+    status: task.status,
+    priority: task.priority,
+    due_date: task.due_date || "",
+    notify_reassign: true,
+  });
+  const [busy, setBusy] = useState(false);
+  const isReassigning = String(form.member_id) !== String(task.member_id);
+
+  const change = e => {
+    const val = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    setForm({ ...form, [e.target.name]: val });
+  };
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    await onSave(task.id, {
+      title: form.title,
+      description: form.description,
+      member_id: Number(form.member_id),
+      status: form.status,
+      priority: form.priority,
+      due_date: form.due_date || null,
+      notify_reassign: form.notify_reassign,
+    });
+    setBusy(false);
+  }
+
+  const assignee = members.find(m => m.id === Number(form.member_id));
+
+  return (
+    <Modal title="Edit Task" onClose={onClose}>
+      <form onSubmit={submit} className="form">
+        <label>
+          Task title
+          <input name="title" value={form.title} onChange={change} required />
+        </label>
+
+        <label>
+          Assigned To
+          <select name="member_id" value={form.member_id} onChange={change}>
+            {members.map(m => (
+              <option key={m.id} value={m.id}>
+                {m.avatar} {m.name} &bull; {m.role} ({m.email})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {isReassigning && (
+          <div className="reassign-notice">
+            <UserCog size={14} />
+            <span>
+              Reassigning to <b>{assignee?.name}</b>. Their portal link and task list update immediately.
+            </span>
+          </div>
+        )}
+
+        <div className="form-row">
+          <label>
+            Status
+            <select name="status" value={form.status} onChange={change}>
+              <option value="todo">Yet to Start</option>
+              <option value="in_progress">In Progress</option>
+              <option value="review">Submit for Review</option>
+              <option value="done">Completed</option>
+            </select>
+          </label>
+
+          <label>
+            Priority
+            <select name="priority" value={form.priority} onChange={change}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </label>
+        </div>
+
+        <label>
+          Due date
+          <input type="date" name="due_date" value={form.due_date || ""} onChange={change} />
+        </label>
+
+        <label>
+          Description &amp; Instructions
+          <textarea name="description" value={form.description} onChange={change} rows="3" />
+        </label>
+
+        {isReassigning && (
+          <div className="checkbox-row">
+            <input
+              type="checkbox"
+              id="notify_reassign"
+              name="notify_reassign"
+              checked={form.notify_reassign}
+              onChange={change}
+            />
+            <label htmlFor="notify_reassign" className="checkbox-label">
+              ✉️ Email {assignee?.name} about this reassignment
+            </label>
+          </div>
+        )}
+
+        <div className="form-actions-row">
+          <button
+            type="button"
+            className="secondary-btn danger-outline"
+            onClick={() => onDelete(task)}
+          >
+            <Trash2 size={15} /> Delete
+          </button>
+          <button className="primary-btn" type="submit" disabled={busy}>
+            <Check size={16} /> {busy ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function DeleteTaskModal({ task, onClose, onConfirm }) {
+  return (
+    <Modal title="Delete Task" onClose={onClose}>
+      <div className="confirm-body">
+        <div className="confirm-icon"><AlertTriangle size={22} /></div>
+        <p>
+          Permanently delete <b>{task.title}</b>?
+        </p>
+        <p className="confirm-warn">
+          <Trash2 size={14} />
+          This cannot be undone. If you only want it off the active board, mark it Completed instead.
+        </p>
+      </div>
+      <div className="confirm-actions">
+        <button className="secondary-btn" onClick={onClose}>Cancel</button>
+        <button className="danger-btn" onClick={onConfirm}>
+          <Trash2 size={15} /> Delete Task
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function CompletedView({
+  tasks, search, onSearch,
+  onEdit, onDelete, onRestore, onCopyPortalLink, onResendEmail
+}) {
+  const visible = tasks.filter(t =>
+    !search || `${t.title} ${t.description} ${t.member_name}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const byMember = visible.reduce((acc, t) => {
+    const key = t.member_name || "Unassigned";
+    (acc[key] = acc[key] || []).push(t);
+    return acc;
+  }, {});
+
+  return (
+    <section className="completed-view">
+      <div className="section-head">
+        <div>
+          <div className="eyebrow">ARCHIVE</div>
+          <h2>Completed Tasks</h2>
+          <p>Everything your team has finished. Reopen a task to send it back to the board.</p>
+        </div>
+        <div className="search">
+          <Search size={16} />
+          <input
+            value={search}
+            onChange={e => onSearch(e.target.value)}
+            placeholder="Search completed tasks..."
+          />
+        </div>
+      </div>
+
+      {visible.length === 0 ? (
+        <div className="column-empty completed-empty">
+          <CheckCircle2 size={16} />
+          {search ? "No completed tasks match that search." : "Nothing completed yet. Finished tasks land here automatically."}
+        </div>
+      ) : (
+        Object.entries(byMember).map(([memberName, list]) => (
+          <div key={memberName} className="completed-group">
+            <div className="completed-group-head">
+              <span>{memberName}</span>
+              <span className="queue-count">{list.length} done</span>
+            </div>
+            <div className="completed-list">
+              {list.map(t => (
+                <div key={t.id} className="completed-row">
+                  <span className="completed-check"><CheckCircle2 size={15} /></span>
+                  <div className="completed-main">
+                    <strong>{t.title}</strong>
+                    <div className="completed-meta">
+                      <span className={`priority ${t.priority}`}>{t.priority}</span>
+                      <span>Due {t.due_date || "n/a"}</span>
+                      {t.updated_at && <span>Closed {String(t.updated_at).slice(0, 10)}</span>}
+                    </div>
+                    {t.notes && <div className="completed-note">"{t.notes}"</div>}
+                  </div>
+                  <div className="completed-actions">
+                    <button
+                      className="member-edit-btn"
+                      title="Reopen and put back on the board"
+                      onClick={() => onRestore(t)}
+                    >
+                      <Undo2 size={13} /> Reopen
+                    </button>
+                    <button
+                      className="member-edit-btn"
+                      title="Edit this task"
+                      onClick={() => onEdit(t)}
+                    >
+                      <Pencil size={13} /> Edit
+                    </button>
+                    <button
+                      className="member-delete-btn"
+                      title="Delete permanently"
+                      onClick={() => onDelete(t)}
+                    >
+                      <Trash2 size={13} /> Delete
+                    </button>
+                    <button
+                      className="member-edit-btn"
+                      title="Copy employee portal link"
+                      onClick={() => onCopyPortalLink(t.member_id)}
+                    >
+                      <Copy size={13} />
+                    </button>
+                    <button
+                      className="member-edit-btn"
+                      title="Resend assignment email"
+                      onClick={() => onResendEmail(t.id)}
+                    >
+                      <Mail size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </section>
   );
 }
 

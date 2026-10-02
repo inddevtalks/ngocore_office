@@ -143,12 +143,86 @@ def get_outbox(limit=50):
         print(f"[OUTBOX READ ERROR] {e}")
         return []
 
+def _setting_key(name):
+    return f"smtp_{name}"
+
+
+def _load_stored_setting(name, default=""):
+    """Read one SMTP value saved through the Email Center."""
+    try:
+        module = _resolve_module()
+        with _maybe_app_context(module.app):
+            row = module.AppSetting.query.filter_by(key=_setting_key(name)).first()
+            return (row.value if row and row.value else default)
+    except Exception as e:
+        print(f"[SMTP SETTINGS READ ERROR] {name}: {e}")
+        return default
+
+
+def _save_setting(key, value):
+    """Persist one setting row, creating it if needed."""
+    module = _resolve_module()
+    with _maybe_app_context(module.app):
+        row = module.AppSetting.query.filter_by(key=key).first()
+        if row:
+            row.value = value or ""
+        else:
+            module.db.session.add(module.AppSetting(key=key, value=value or ""))
+        module.db.session.commit()
+
+
+def _derive_encryption_key():
+    """Derive a 32-byte Fernet key from SECRET_KEY.
+
+    Storing the SMTP password in the database means it must not sit in plain
+    text, so it is encrypted with a key derived from the app secret. Changing
+    SECRET_KEY makes existing stored credentials unreadable.
+    """
+    import base64
+    import hashlib
+
+    secret = (os.getenv("SECRET_KEY") or "").strip()
+    if not secret:
+        # Local fallback so saving still works without SECRET_KEY configured.
+        secret = "office-task-hub-local-development-key"
+    digest = hashlib.sha256(secret.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest)
+
+
+def encrypt_secret(plaintext):
+    from cryptography.fernet import Fernet
+
+    if not plaintext:
+        return ""
+    return Fernet(_derive_encryption_key()).encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_secret(ciphertext):
+    from cryptography.fernet import Fernet, InvalidToken
+
+    if not ciphertext:
+        return ""
+    try:
+        return Fernet(_derive_encryption_key()).decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        # Most likely SECRET_KEY changed, so the stored value is unreadable.
+        return ""
+
+
 def get_smtp_config():
-    host = os.getenv("SMTP_HOST", "").strip()
-    port = int(os.getenv("SMTP_PORT", "587"))
-    user = os.getenv("SMTP_USERNAME", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "").strip()
-    from_email = os.getenv("SMTP_FROM", "").strip() or user
+    """Environment variables win; anything missing falls back to what was saved
+    through the Email Center, so the form stays configured across restarts."""
+    host = os.getenv("SMTP_HOST", "").strip() or _load_stored_setting("host")
+    try:
+        port = int(os.getenv("SMTP_PORT", "").strip() or _load_stored_setting("port", "587"))
+    except ValueError:
+        port = 587
+    user = os.getenv("SMTP_USERNAME", "").strip() or _load_stored_setting("username")
+
+    env_password = os.getenv("SMTP_PASSWORD", "").strip()
+    password = env_password or decrypt_secret(_load_stored_setting("password"))
+
+    from_email = os.getenv("SMTP_FROM", "").strip() or _load_stored_setting("from_email") or user
     is_configured = bool(host and user and password and from_email)
     return {
         "host": host,
@@ -160,55 +234,65 @@ def get_smtp_config():
     }
 
 def update_smtp_config(host, port, username, password, from_email):
-    """Saves SMTP credentials to backend/.env and updates os.environ dynamically."""
+    """Persists SMTP credentials to the database and syncs the live process."""
     host = (host or "smtp.gmail.com").strip()
     port = str(port or "587").strip()
     username = (username or "").strip()
     password = (password or "").strip()
     from_email = (from_email or username).strip()
 
+    # Persist to the database so the settings survive a refresh, a restart and
+    # a redeploy. The password is encrypted, never stored as plain text.
+    _save_setting(_setting_key("host"), host)
+    _save_setting(_setting_key("port"), str(port))
+    _save_setting(_setting_key("username"), username)
+    _save_setting(_setting_key("password"), encrypt_secret(password))
+    _save_setting(_setting_key("from_email"), from_email)
+
+    # Keep the live process in sync so a test email sent right after saving works.
     os.environ["SMTP_HOST"] = host
-    os.environ["SMTP_PORT"] = port
+    os.environ["SMTP_PORT"] = str(port)
     os.environ["SMTP_USERNAME"] = username
     os.environ["SMTP_PASSWORD"] = password
     os.environ["SMTP_FROM"] = from_email
 
-    if IS_SERVERLESS:
-        # The deployed filesystem is read-only and each container is cold-started
-        # from the env vars Vercel provides, so writing credentials to disk would
-        # silently do nothing. Say so instead of pretending it saved.
-        print("[SMTP] Saved for this container instance. Add these values as Vercel environment variables to persist them.")
-        return get_smtp_config()
+    if not IS_SERVERLESS:
+        # Also mirror to .env for local convenience. The database is the
+        # source of truth, so a failed write here is harmless.
+        _mirror_to_env_file({
+            "SMTP_HOST": host,
+            "SMTP_PORT": str(port),
+            "SMTP_USERNAME": username,
+            "SMTP_PASSWORD": password,
+            "SMTP_FROM": from_email,
+        })
 
-    new_keys = {
-        "SMTP_HOST": host,
-        "SMTP_PORT": port,
-        "SMTP_USERNAME": username,
-        "SMTP_PASSWORD": password,
-        "SMTP_FROM": from_email,
-    }
-
-    lines = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
-
-    updated_keys = set()
-    new_lines = []
-    for line in lines:
-        if "=" in line and not line.strip().startswith("#"):
-            k = line.split("=", 1)[0].strip()
-            if k in new_keys:
-                new_lines.append(f"{k}={new_keys[k]}")
-                updated_keys.add(k)
-                continue
-        new_lines.append(line)
-
-    for k, v in new_keys.items():
-        if k not in updated_keys:
-            new_lines.append(f"{k}={v}")
-
-    ENV_PATH.write_text("\n".join(new_lines), encoding="utf-8")
     return get_smtp_config()
+
+
+def _mirror_to_env_file(new_keys):
+    try:
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            if "=" in line and not line.strip().startswith("#"):
+                k = line.split("=", 1)[0].strip()
+                if k in new_keys:
+                    new_lines.append(f"{k}={new_keys[k]}")
+                    updated_keys.add(k)
+                    continue
+            new_lines.append(line)
+
+        for k, v in new_keys.items():
+            if k not in updated_keys:
+                new_lines.append(f"{k}={v}")
+
+        ENV_PATH.write_text("\n".join(new_lines), encoding="utf-8")
+    except Exception as e:
+        print(f"[SMTP ENV MIRROR NOTICE] {e}")
+
 
 def send_task_assignment_email(task, member, frontend_url=None):
     """

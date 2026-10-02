@@ -48,6 +48,7 @@ In the Vercel project under **Settings > Environment Variables**, add:
 | --- | --- | --- |
 | `DATABASE_URL` | Your Neon connection string | Yes |
 | `SECRET_KEY` | Any long random string, e.g. `python -c "import secrets; print(secrets.token_hex(32))"` | Yes |
+| `ADMIN_PASSWORD` | Password for the manager dashboard. Same command. Without it the dashboard is open to anyone. | Strongly recommended |
 | `CRON_SECRET` | Another random string, same command | Yes |
 | `FRONTEND_URL` | Your Vercel domain, e.g. `https://ngocore-office.vercel.app` | Yes |
 | `SMTP_HOST` | `smtp.gmail.com` | For live email |
@@ -114,11 +115,14 @@ so once a day is the finest granularity for a specific time.
 the SQLAlchemy cascade. The UI now warns you with the task count before you
 confirm.
 
-**No authentication.** Anyone who finds the URL can read your whole team and
-task list, and employees' portal links are just `?portal=<id>` with no login.
-That was true locally too, where being on localhost was the protection. On a
-public domain it is not. If this holds real team data, put Vercel deployment
-protection or an auth layer in front of it.
+**Manager access needs a password.** Set `ADMIN_PASSWORD` as a Vercel
+environment variable, otherwise anyone with the URL can read your whole team
+and task list. Employees do not need it; they open their own portal link.
+
+**Employee portal links are guessable.** A portal is just `?portal=<id>`, so
+one member can open another's by changing the number. The API blocks them from
+editing anyone else's task, but they can still read it. If that matters, the
+fix is a unique random token per member rather than a sequential id.
 
 **SQLite still works locally.** Leave `DATABASE_URL=sqlite:///office_tasks.db`
 in `backend/.env` and nothing about your local workflow changes.

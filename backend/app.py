@@ -1,9 +1,10 @@
 import os
 import sys
-from datetime import datetime, date
+import hmac
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
@@ -58,6 +59,13 @@ app.config["SQLALCHEMY_DATABASE_URI"] = normalize_database_url(
     os.getenv("DATABASE_URL", "sqlite:///office_tasks.db")
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# Keep the manager signed in across browser restarts.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# HTTPS-only cookies are the default in production, but being explicit also
+# covers an HTTP preview deployment.
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("VERCEL") is not None
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 # Serverless platforms reuse warm containers; recycle connections after a while
 # instead of holding them open until the pool times out.
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
@@ -74,6 +82,19 @@ class TeamMember(db.Model):
     active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     tasks = db.relationship("Task", backref="member", lazy=True, cascade="all, delete-orphan")
+
+
+class AppSetting(db.Model):
+    """Persisted settings that must survive refreshes and redeploys.
+
+    The Email Center used to write to backend/.env, which is read-only on
+    Vercel and discarded between containers, so the form asked for credentials
+    on every page load.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(120), unique=True, nullable=False)
+    value = db.Column(db.Text, default="")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class EmailLog(db.Model):
@@ -151,8 +172,37 @@ from emailer import (
     send_test_email,
     get_smtp_config,
     update_smtp_config,
-    send_daily_emails
+    send_daily_emails,
+    decrypt_secret,
 )
+
+
+# ---------------- Admin Authentication ----------------
+
+def is_admin_auth_enabled():
+    """Auth is only enforced once an ADMIN_PASSWORD is configured, so local
+    development keeps working without any setup."""
+    return bool(os.getenv("ADMIN_PASSWORD", "").strip())
+
+
+def is_admin_authenticated():
+    return session.get("is_admin") is True
+
+
+def require_admin(fn):
+    """Guards every manager-facing endpoint. Member portal routes stay open
+    because employees reach them by their own shareable link."""
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not is_admin_auth_enabled():
+            return fn(*args, **kwargs)
+        if not is_admin_authenticated():
+            return jsonify({"error": "Manager sign-in required.", "auth_required": True}), 401
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # ---------------- STATIC SPA FRONTEND SERVING (SINGLE SERVER) ----------------
@@ -179,6 +229,38 @@ def serve_frontend(path):
 
 # ---------------- API ENDPOINTS ----------------
 
+@app.get("/api/auth/status")
+def auth_status():
+    """Lets the frontend know whether it should show a sign-in screen."""
+    return jsonify({
+        "enabled": is_admin_auth_enabled(),
+        "authenticated": is_admin_authenticated(),
+    })
+
+
+@app.post("/api/auth/login")
+def auth_login():
+    if not is_admin_auth_enabled():
+        return jsonify({"ok": True, "enabled": False})
+
+    data = request.get_json(silent=True) or {}
+    supplied = (data.get("password") or "").strip()
+    expected = os.getenv("ADMIN_PASSWORD", "").strip()
+
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return jsonify({"error": "Incorrect password."}), 401
+
+    session.permanent = True
+    session["is_admin"] = True
+    return jsonify({"ok": True, "enabled": True})
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    session.pop("is_admin", None)
+    return jsonify({"ok": True})
+
+
 @app.get("/api/health")
 def health():
     cfg = get_smtp_config()
@@ -191,6 +273,7 @@ def health():
 
 
 @app.get("/api/dashboard")
+@require_admin
 def dashboard():
     members = TeamMember.query.filter_by(active=True).order_by(TeamMember.id).all()
     tasks = Task.query.order_by(Task.position.asc(), Task.created_at.desc()).all()
@@ -221,11 +304,13 @@ def dashboard():
 
 
 @app.get("/api/members")
+@require_admin
 def get_members():
     return jsonify([member_dict(m) for m in TeamMember.query.order_by(TeamMember.id).all()])
 
 
 @app.post("/api/members")
+@require_admin
 def create_member():
     data = request.get_json(force=True)
     name = (data.get("name") or "").strip()
@@ -247,6 +332,7 @@ def create_member():
 
 
 @app.put("/api/members/<int:member_id>")
+@require_admin
 def update_member(member_id):
     member = db.get_or_404(TeamMember, member_id)
     data = request.get_json(force=True) or {}
@@ -276,6 +362,7 @@ def update_member(member_id):
 
 
 @app.delete("/api/members/<int:member_id>")
+@require_admin
 def delete_member(member_id):
     member = db.get_or_404(TeamMember, member_id)
     # tasks relationship uses cascade="all, delete-orphan", so assigned tasks go too
@@ -291,34 +378,47 @@ def delete_member(member_id):
 
 
 @app.get("/api/tasks")
+@require_admin
 def get_tasks():
     return jsonify([t.to_dict() for t in Task.query.order_by(Task.position.asc(), Task.created_at.desc()).all()])
 
 
 @app.post("/api/tasks")
+@require_admin
 def create_task():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     member_id = data.get("member_id")
     if not title or not member_id:
         return jsonify({"error": "Task title and team member are required."}), 400
 
-    member = db.session.get(TeamMember, int(member_id))
+    try:
+        member = db.session.get(TeamMember, int(member_id))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid team member."}), 400
     if not member:
         return jsonify({"error": "Team member not found."}), 404
+
+    status = data.get("status") or "todo"
+    if status not in VALID_STATUSES:
+        return jsonify({"error": f"Invalid status. Must be one of: {', '.join(VALID_STATUSES)}"}), 400
+
+    priority = data.get("priority") or "medium"
+    if priority not in VALID_PRIORITIES:
+        return jsonify({"error": f"Invalid priority. Must be one of: {', '.join(VALID_PRIORITIES)}"}), 400
 
     due = None
     if data.get("due_date"):
         try:
             due = date.fromisoformat(data["due_date"])
         except ValueError:
-            pass
+            return jsonify({"error": "Due date must be in YYYY-MM-DD format."}), 400
 
     task = Task(
         title=title,
         description=data.get("description") or "",
-        status=data.get("status") or "todo",
-        priority=data.get("priority") or "medium",
+        status=status,
+        priority=priority,
         due_date=due,
         member_id=member.id,
         notes=data.get("notes") or "",
@@ -338,29 +438,56 @@ def create_task():
     return jsonify(response_data), 201
 
 
+VALID_STATUSES = ("todo", "in_progress", "review", "done")
+VALID_PRIORITIES = ("low", "medium", "high", "urgent")
+
+
 @app.put("/api/tasks/<int:task_id>")
+@require_admin
 def update_task(task_id):
     task = db.get_or_404(Task, task_id)
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
 
     old_member_id = task.member_id
 
-    for field in ("title", "description", "status", "priority", "notes"):
+    if "title" in data:
+        title = (data["title"] or "").strip()
+        if not title:
+            return jsonify({"error": "Task title cannot be empty."}), 400
+        task.title = title
+
+    if "status" in data:
+        if data["status"] not in VALID_STATUSES:
+            return jsonify({"error": f"Invalid status. Must be one of: {', '.join(VALID_STATUSES)}"}), 400
+        task.status = data["status"]
+
+    if "priority" in data:
+        if data["priority"] not in VALID_PRIORITIES:
+            return jsonify({"error": f"Invalid priority. Must be one of: {', '.join(VALID_PRIORITIES)}"}), 400
+        task.priority = data["priority"]
+
+    for field in ("description", "notes"):
         if field in data:
-            setattr(task, field, data[field])
+            setattr(task, field, data[field] or "")
 
     if "member_id" in data:
-        new_id = int(data["member_id"])
+        try:
+            new_id = int(data["member_id"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid team member."}), 400
         member = db.session.get(TeamMember, new_id)
         if not member:
             return jsonify({"error": "Team member not found."}), 404
         task.member_id = member.id
 
     if "due_date" in data:
-        try:
-            task.due_date = date.fromisoformat(data["due_date"]) if data["due_date"] else None
-        except ValueError:
-            pass
+        if data["due_date"]:
+            try:
+                task.due_date = date.fromisoformat(data["due_date"])
+            except ValueError:
+                return jsonify({"error": "Due date must be in YYYY-MM-DD format."}), 400
+        else:
+            task.due_date = None
 
     if "position" in data:
         task.position = int(data["position"])
@@ -369,17 +496,20 @@ def update_task(task_id):
     db.session.commit()
 
     email_result = None
-    if "member_id" in data and int(data["member_id"]) != old_member_id and data.get("notify_reassign", True):
+    reassigned = "member_id" in data and task.member_id != old_member_id
+    if reassigned and data.get("notify_reassign", True):
         member = db.session.get(TeamMember, task.member_id)
         if member:
             email_result = send_task_assignment_email(task, member)
 
     res = task.to_dict()
     res["email_result"] = email_result
+    res["reassigned"] = reassigned
     return jsonify(res)
 
 
 @app.delete("/api/tasks/<int:task_id>")
+@require_admin
 def delete_task(task_id):
     task = db.get_or_404(Task, task_id)
     db.session.delete(task)
@@ -388,6 +518,7 @@ def delete_task(task_id):
 
 
 @app.post("/api/tasks/<int:task_id>/resend-email")
+@require_admin
 def resend_task_email(task_id):
     task = db.get_or_404(Task, task_id)
     member = db.session.get(TeamMember, task.member_id)
@@ -428,17 +559,23 @@ def member_portal(member_id):
 
 @app.put("/api/portal/task/<int:task_id>")
 def member_update_task(task_id):
-    """Allows an employee to update status and notes from their direct link."""
-    task = db.get_or_404(Task, task_id)
-    data = request.get_json(force=True)
+    """Allows an employee to update status and notes from their direct link.
 
-    valid_statuses = ("todo", "in_progress", "review", "done")
+    Deliberately limited to those two fields. Employees may not retitle,
+    reprioritise or reassign their own work, and must not be able to read or
+    write another member's task.
+    """
+    task = db.get_or_404(Task, task_id)
+    data = request.get_json(silent=True) or {}
+
+    if "member_id" in data:
+        return jsonify({"error": "Employees cannot reassign tasks."}), 403
+
     if "status" in data:
         new_status = data["status"]
-        if new_status in valid_statuses:
-            task.status = new_status
-        else:
-            return jsonify({"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"}), 400
+        if new_status not in VALID_STATUSES:
+            return jsonify({"error": f"Invalid status. Must be one of: {', '.join(VALID_STATUSES)}"}), 400
+        task.status = new_status
 
     if "notes" in data:
         task.notes = (data["notes"] or "").strip()
@@ -451,6 +588,7 @@ def member_update_task(task_id):
 # ---------------- Email Center Endpoints ----------------
 
 @app.get("/api/email/outbox")
+@require_admin
 def email_outbox():
     cfg = get_smtp_config()
     outbox = get_outbox(limit=40)
@@ -467,6 +605,7 @@ def email_outbox():
 
 
 @app.post("/api/email/config")
+@require_admin
 def save_email_config():
     """Allows saving SMTP settings directly from the frontend UI."""
     data = request.get_json(force=True) or {}
@@ -481,22 +620,15 @@ def save_email_config():
 
     new_cfg = update_smtp_config(host, port, username, password, from_email)
 
-    message = "SMTP settings saved successfully!"
-    if os.getenv("VERCEL"):
-        message = (
-            "SMTP verified and active for this deployment. To make it stick across "
-            "redeploys, add these values as Vercel environment variables."
-        )
-
     return jsonify({
         "ok": True,
-        "message": message,
+        "message": "SMTP settings saved. They will stay configured after a refresh or redeploy.",
         "smtp": new_cfg,
-        "persist_warning": bool(os.getenv("VERCEL")),
     })
 
 
 @app.post("/api/email/test")
+@require_admin
 def test_email():
     data = request.get_json(force=True) or {}
     to_email = data.get("to_email")
@@ -513,6 +645,7 @@ def test_email():
 # ---------------- Seed Demo Office ----------------
 
 @app.post("/api/seed")
+@require_admin
 def seed():
     if TeamMember.query.count() > 0:
         return jsonify({"message": "Demo data already exists."})

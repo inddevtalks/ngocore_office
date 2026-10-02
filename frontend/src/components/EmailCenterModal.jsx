@@ -28,7 +28,11 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
   async function loadOutbox() {
     try {
       setLoading(true);
-      const res = await fetch("/api/email/outbox");
+      const res = await fetch("/api/email/outbox", { credentials: "same-origin" });
+      if (res.status === 401) {
+        // Session expired while this modal was open; let the dashboard handle it.
+        return;
+      }
       const json = await res.json();
       setData(json);
       if (json.smtp) {
@@ -39,8 +43,10 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
           username: json.smtp.username || "",
           from_email: json.smtp.from_email || json.smtp.username || "",
         }));
+        // Only nag for credentials when there genuinely are none. Once saved to
+        // the database this stays closed across refreshes.
         if (!json.smtp.configured) {
-          setShowConfigForm(true); // Automatically show configuration form if not set up
+          setShowConfigForm(true);
         }
       }
     } catch (err) {
@@ -62,16 +68,19 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
       const res = await fetch("/api/email/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify(configForm),
       });
       const json = await res.json();
       if (!res.ok) {
         setConfigResult({ ok: false, message: json.error || "Failed to save SMTP settings." });
       } else {
-        setConfigResult({ ok: true, message: "Settings saved! Testing connection..." });
+        setConfigResult({ ok: true, message: json.message || "Settings saved!" });
+        // Credentials now live in the database, so close the form rather than
+        // leaving it open to be re-entered on every refresh.
+        setShowConfigForm(false);
         loadOutbox();
         if (onSmtpUpdated) onSmtpUpdated();
-        // Also auto-test with user's own email
         if (configForm.username) {
           setTestEmail(configForm.username);
         }
@@ -92,6 +101,7 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
       const res = await fetch("/api/email/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify({ to_email: testEmail }),
       });
       const json = await res.json();

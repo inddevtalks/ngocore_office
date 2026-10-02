@@ -4,7 +4,7 @@ import {
   Sparkles, FileText, Send, Zap, ChevronRight, MessageSquare, Calendar
 } from "lucide-react";
 
-export default function MemberPortal({ memberId, onBackToManager }) {
+export default function MemberPortal({ memberId, onBackToManager, previewMode = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -17,7 +17,7 @@ export default function MemberPortal({ memberId, onBackToManager }) {
   async function loadPortal() {
     try {
       setLoading(true);
-      const res = await fetch(`/api/portal/${memberId}`);
+      const res = await fetch(`/api/portal/${memberId}`, { credentials: "same-origin" });
       if (!res.ok) {
         throw new Error("Unable to load member status portal. Check the link or ID.");
       }
@@ -124,14 +124,18 @@ export default function MemberPortal({ memberId, onBackToManager }) {
         <AlertCircle size={44} className="err-icon" />
         <h2>Workspace Not Found</h2>
         <p>{error || "We couldn't find a member with this ID."}</p>
-        <button className="primary-btn" onClick={onBackToManager}>
-          <ArrowLeft size={16} /> Return to Main Office
-        </button>
+        {previewMode && (
+          <button className="primary-btn" onClick={onBackToManager}>
+            <ArrowLeft size={16} /> Return to Main Office
+          </button>
+        )}
       </div>
     );
   }
 
   const { member, tasks, stats } = data;
+  // Only the manager previewing a portal gets the "back to dashboard" control.
+  const allowManagerReturn = previewMode && typeof onBackToManager === "function";
 
   const filteredTasks = tasks.filter(t => {
     if (activeTab === "all") return true;
@@ -155,11 +159,19 @@ export default function MemberPortal({ memberId, onBackToManager }) {
             {copied ? <Check size={16} /> : <Copy size={16} />}
             {copied ? "Link Copied" : "Bookmark / Copy Link"}
           </button>
-          <button className="ghost-btn" onClick={onBackToManager}>
-            <ArrowLeft size={15} /> Manager Dashboard
-          </button>
         </div>
       </header>
+
+      {/* Employees have no manager password, so this only shows for the manager
+          previewing a workspace from the dashboard. */}
+      {allowManagerReturn && (
+        <div className="portal-manager-bar">
+          <span>You are previewing a team member's workspace.</span>
+          <button className="ghost-btn" onClick={onBackToManager}>
+            <ArrowLeft size={14} /> Back to Manager Dashboard
+          </button>
+        </div>
+      )}
 
       {/* Member Hero Banner */}
       <div className="portal-hero">
