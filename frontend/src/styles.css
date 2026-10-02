@@ -2828,6 +2828,82 @@ button { cursor: pointer; color: inherit; }
   margin: 0; word-break: break-word;
 }
 
+/* ---------------- MOBILE MORE SHEET ---------------- */
+.more-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 7, 13, 0.7);
+  backdrop-filter: blur(3px);
+  z-index: 60;
+}
+.more-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 61;
+  background: #0d1928;
+  border-top: 1px solid #304358;
+  border-radius: 18px 18px 0 0;
+  padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
+  animation: sheet-up 0.22s ease-out;
+}
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.more-sheet-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.more-sheet-head strong { font: 600 14px "Space Grotesk"; color: var(--text); }
+.more-sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.more-sheet-grid button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 14px 6px;
+  border: 1px solid var(--line);
+  background: #101d2e;
+  border-radius: 12px;
+  color: #c2d2e1;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.more-sheet-grid button:active { background: #16283c; }
+.more-sheet-grid button.active {
+  border-color: var(--gold);
+  color: var(--gold);
+  background: rgba(245, 184, 61, 0.08);
+}
+.more-sheet-email {
+  width: 100%;
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 /* ---------------- SITE QA ---------------- */
 .qa-view { display: grid; gap: 14px; }
 .qa-loading, .qa-empty {

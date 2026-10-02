@@ -1205,8 +1205,23 @@ def jarvis_ask():
 @app.get("/api/jarvis/greeting")
 @require_admin
 def jarvis_greeting():
+    """Opens with a live read of the workspace, not a feature list."""
+    members = TeamMember.query.order_by(TeamMember.id).all()
+    tasks = Task.query.order_by(Task.position.asc(), Task.created_at.desc()).all()
+    qa_run = _latest_qa_run()
+    sec_run = _latest_security_run()
+
+    ctx = jarvis.build_context(
+        members,
+        tasks,
+        qa_run.to_dict() if qa_run else None,
+        sec_run.to_dict() if sec_run else None,
+    )
+    briefing = jarvis.build_briefing(ctx)
+
     return jsonify({
-        "text": jarvis.greeting(),
+        "text": briefing["text"],
+        "actions": briefing.get("actions", []),
         "suggestions": jarvis.SUGGESTIONS,
         "capability_count": len(jarvis.INTENTS)
         + len(jarvis._task_context(""))

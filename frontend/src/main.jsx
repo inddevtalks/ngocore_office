@@ -42,6 +42,15 @@ async function api(path, options = {}) {
   return data;
 }
 
+const MORE_SECTIONS = [
+  { view: "tasks", label: "All Tasks", icon: <ListChecks size={20} /> },
+  { view: "qa", label: "Site QA", icon: <ShieldCheck size={20} /> },
+  { view: "security", label: "Security", icon: <ShieldAlert size={20} /> },
+  { view: "completed", label: "Completed", icon: <CheckCircle2 size={20} /> },
+  { view: "office", label: "Office Scene", icon: <Coffee size={20} /> },
+  { view: "who_working", label: "Who's Working", icon: <Users size={20} /> },
+];
+
 function App() {
   const [data, setData] = useState({ members: [], tasks: [], stats: {}, smtp_status: {} });
   const [loading, setLoading] = useState(true);
@@ -59,6 +68,7 @@ function App() {
   const [taskMemberFilter, setTaskMemberFilter] = useState("all");
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [prefilledMemberId, setPrefilledMemberId] = useState(null);
   const [toast, setToast] = useState("");
   // Read during the first render, not in an effect. Otherwise an employee
@@ -828,7 +838,53 @@ function App() {
           <Mail size={18} />
           <span>Mail</span>
         </button>
+
+        <button
+          className={`mob-nav-btn ${moreOpen ? "active" : ""}`}
+          onClick={() => setMoreOpen(!moreOpen)}
+          aria-label="More sections"
+        >
+          <Menu size={18} />
+          <span>More</span>
+        </button>
       </nav>
+
+      {/* Everything that does not fit in the bottom bar */}
+      {moreOpen && (
+        <>
+          <div className="more-sheet-backdrop" onClick={() => setMoreOpen(false)} />
+          <div className="more-sheet">
+            <div className="more-sheet-head">
+              <strong>All sections</strong>
+              <button className="close-btn" onClick={() => setMoreOpen(false)}>
+                <X size={17} />
+              </button>
+            </div>
+            <div className="more-sheet-grid">
+              {MORE_SECTIONS.map(s => (
+                <button
+                  key={s.view}
+                  className={activeView === s.view ? "active" : ""}
+                  onClick={() => {
+                    setActiveView(s.view);
+                    setSelectedMember("all");
+                    setMoreOpen(false);
+                  }}
+                >
+                  {s.icon}
+                  <span>{s.label}</span>
+                </button>
+              ))}
+            </div>
+            <button
+              className="more-sheet-email"
+              onClick={() => { setModal("email_center"); setMoreOpen(false); }}
+            >
+              <Mail size={16} /> Email &amp; Outbox
+            </button>
+          </div>
+        </>
+      )}
 
       {/* MODALS */}
       {modal === "task" && (
@@ -2050,7 +2106,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
         const g = await api("/api/jarvis/greeting");
         setSuggestions(g.suggestions || []);
         setCaps(g.capability_count || 0);
-        setMessages([{ role: "jarvis", blocks: { text: g.text } }]);
+        setMessages([{ role: "jarvis", blocks: { text: g.text, actions: g.actions } }]);
         // Browsers block speech until the page has been interacted with, so the
         // greeting is only spoken after the first tap rather than on load.
         setPendingGreeting(g.text);
@@ -2207,7 +2263,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
               )}
             </div>
 
-            {suggestions.length > 0 && messages.length <= 1 && (
+            {suggestions.length > 0 && (
               <div className="jarvis-suggestions">
                 {suggestions.map(s => (
                   <button key={s} onClick={() => send(s)}>{s}</button>
