@@ -2103,36 +2103,119 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
   // The arrival greeting sits on the page instead of opening the chat, so
   // Jarvis says hello without taking the screen over every time you refresh.
   const [greeting, setGreeting] = useState(null);
+  const [heard, setHeard] = useState("");
+
+  const voicesRef = useRef([]);
+  const speechTokenRef = useRef(0);
+  const pendingGreetingRef = useRef(null);
+  const busyRef = useRef(false);
+  const queueRef = useRef([]);
+
+  // Chrome populates the voice list asynchronously, so getVoices() usually
+  // returns nothing on the very first call. Reading it once left Jarvis on
+  // the flat default voice, which is what made it sound robotic.
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const load = () => { voicesRef.current = window.speechSynthesis.getVoices() || []; };
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
+  }, []);
+
+  // Ranks voices so the best-sounding one wins rather than whatever is first.
+  function pickVoice() {
+    const voices = voicesRef.current;
+    if (!voices.length) return null;
+    const score = v => {
+      const n = (v.name || "").toLowerCase();
+      const l = (v.lang || "").toLowerCase();
+      let s = 0;
+      if (/natural|neural/.test(n)) s += 100;   // the genuinely natural ones
+      if (/google/.test(n)) s += 60;
+      if (/^en/.test(l)) s += 40;
+      if (/en-in/.test(l)) s += 25;            // matches the accent
+      if (/^en-us/.test(l)) s += 20;
+      if (/^en-gb/.test(l)) s += 18;
+      if (/female|woman|samantha|jenny|swara|zira|susan|karen|serena|aria/.test(n)) s += 12;
+      if (/compact|espeak|pico/.test(n)) s -= 60; // the famously robotic ones
+      if (!v.localService) s -= 5;
+      return s;
+    };
+    const english = voices.filter(v => /^en/i.test(v.lang || ""));
+    const pool = english.length ? english : voices;
+    return pool.slice().sort((a, b) => score(b) - score(a))[0] || null;
+  }
+
+  // Strips markdown and emoji so the synthesiser does not read punctuation
+  // marks aloud or announce an icon.
+  function speechify(text) {
+    return String(text)
+      .replace(/\*\*/g, "")
+      .replace(/[`#>|]/g, "")
+      .replace(/^\s*[-•]\s*/gm, "")
+      .replace(/\s*[—–]\s*/g, ", ")
+      .replace(/\s*->\s*/g, ", ")
+      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+([.,!?])/g, "$1")
+      .trim();
+  }
+
+  // Speaking one long block makes it drone. Sentence-sized pieces with a
+  // short gap between them is what makes it sound like someone talking.
+  function splitSentences(text, max = 200) {
+    const chunks = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
+    const out = [];
+    let buf = "";
+    for (const chunk of chunks) {
+      if (buf && (buf + chunk).length > max) {
+        out.push(buf.trim());
+        buf = "";
+      }
+      buf += chunk;
+    }
+    if (buf.trim()) out.push(buf.trim());
+    return out.filter(Boolean);
+  }
 
   // Speech output uses the browser's own synthesis engine: no API key, no cost.
   function speak(text) {
     if (!voiceOn || !ttsSupported || !text) return;
-    try {
-      window.speechSynthesis.cancel();
-      const clean = String(text)
-        .replace(/\*\*/g, "")
-        .replace(/[#`>|]/g, "")
-        .slice(0, 400);
-      const utter = new SpeechSynthesisUtterance(clean);
-      utter.rate = 1.02;
-      const voices = window.speechSynthesis.getVoices();
-      const preferred =
-        voices.find(v => /en-IN/i.test(v.lang) && /female|neural/i.test(v.name)) ||
-        voices.find(v => /en-IN/i.test(v.lang)) ||
-        voices.find(v => /^en/i.test(v.lang));
-      if (preferred) utter.voice = preferred;
+    const clean = speechify(text);
+    if (!clean) return;
+
+    // Cancels anything already playing and invalidates its queue.
+    stopSpeaking();
+    const token = speechTokenRef.current;
+    const parts = splitSentences(clean);
+    let i = 0;
+
+    const next = () => {
+      if (token !== speechTokenRef.current) return;
+      if (i >= parts.length) { setSpeaking(false); return; }
+      const utter = new SpeechSynthesisUtterance(parts[i++]);
+      utter.rate = 0.97;   // a shade slower reads far more natural
+      utter.pitch = 1;
+      const voice = pickVoice();
+      if (voice) utter.voice = voice;
       utter.onstart = () => setSpeaking(true);
-      utter.onend = () => setSpeaking(false);
-      utter.onerror = () => setSpeaking(false);
+      utter.onend = () => {
+        if (token !== speechTokenRef.current) return;
+        if (i < parts.length) setTimeout(next, 80);
+        else setSpeaking(false);
+      };
+      utter.onerror = () => { if (token === speechTokenRef.current) setSpeaking(false); };
       window.speechSynthesis.speak(utter);
-    } catch {
-      setSpeaking(false);
-    }
+    };
+
+    next();
   }
 
   function stopSpeaking() {
+    // Bumping the token makes any in-flight queue abandon itself.
+    speechTokenRef.current += 1;
     try {
-      window.speechSynthesis.cancel();
+      window.speechSynthesis?.cancel();
     } catch {
       // Nothing to cancel when synthesis is unavailable.
     }
@@ -2150,6 +2233,9 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     if (last?.blocks?.text) speak(last.blocks.text);
   }
   const recognitionRef = useRef(null);
+  // Mirrors `listening` in a ref, because the click handler needs the current
+  // value immediately and React state is not updated yet inside the handler.
+  const listeningRef = useRef(false);
 
   // Re-fetching when the saved name changes means the greeting updates the
   // moment it is saved, without needing a page reload.
@@ -2163,9 +2249,11 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
         setCaps(g.capability_count || 0);
         setMessages([{ role: "jarvis", blocks: { text: g.text, actions: g.actions } }]);
         setGreeting({ text: g.text, actions: g.actions || [] });
-        // Browsers block speech until the page has been interacted with, so the
-        // greeting is only spoken after the first tap rather than on load.
+        // Browsers refuse to play audio until the page has been interacted
+        // with, so the greeting waits for the first tap, keypress or scroll
+        // anywhere on the page rather than only when the button is pressed.
         setPendingGreeting(g.text);
+        pendingGreetingRef.current = g.text;
       } catch (e) {
         if (cancelled) return;
         if (e.authRequired) return onAuthLoss();
@@ -2176,51 +2264,160 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [managerName]);
 
+  // Chrome, Edge and Safari all block spoken audio until the user has touched
+  // the page. Listening for the very first interaction anywhere on the page is
+  // what lets the greeting actually be heard on arrival, instead of the user
+  // having to find and press the Jarvis button first.
+  useEffect(() => {
+    if (!pendingGreeting) return;
+
+    const fire = () => {
+      const text = pendingGreetingRef.current;
+      if (!text) return;
+      pendingGreetingRef.current = null;
+      setPendingGreeting(null);
+      // Let the click that triggered this finish before starting audio.
+      setTimeout(() => speak(text), 60);
+    };
+
+    const events = ["pointerdown", "keydown", "touchstart", "wheel"];
+    events.forEach(e =>
+      window.addEventListener(e, fire, { once: true, passive: true, capture: true })
+    );
+    return () => {
+      events.forEach(e => window.removeEventListener(e, fire, { capture: true }));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGreeting]);
+
   useEffect(() => {
     // Web Speech API is free and browser-native: no API key, no cost.
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SR) {
       setSpeechSupported(true);
-      const recognition = new SR();
-      recognition.continuous = false;
-      // Interim results show what it is hearing as you speak, which is what
-      // makes it obvious the mic is live rather than silently broken.
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-      recognition.lang = "en-IN";
-
-      let finalText = "";
-      recognition.onresult = (event) => {
-        let interim = "";
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const chunk = event.results[i][0].transcript;
-          if (event.results[i].isFinal) finalText += chunk;
-          else interim += chunk;
-        }
-        if (interim) setInput(finalText + interim);
-        if (finalText.trim()) {
-          const said = finalText.trim();
-          finalText = "";
-          setListening(false);
-          send(said);
-        }
-      };
-      recognition.onerror = (event) => {
-        setListening(false);
-        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-          onToast("Microphone is blocked. Allow it in your browser settings, then tap the mic again.");
-        } else if (event.error === "no-speech") {
-          onToast("I did not catch that. Tap the mic and speak straight after.");
-        } else if (event.error !== "aborted") {
-          onToast("Voice input did not work in this browser. You can type instead.");
-        }
-      };
-      recognition.onend = () => setListening(false);
-      recognitionRef.current = recognition;
       if (window.speechSynthesis) { setTtsSupported(true); }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Builds a fresh recogniser each time. Chrome marks an instance unusable
+  // once it has ended, so reusing the same one made the second attempt fail.
+  function buildRecognition(SR) {
+    const recognition = new SR();
+    // Continuous, because with it off a normal pause in speech ends the
+    // session and the rest of the sentence is lost.
+    recognition.continuous = true;
+    // Interim results show the words as they arrive, which is the clearest
+    // sign that the microphone is genuinely live.
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = "en-IN";
+
+    let finalText = "";
+    let consumed = 0;      // results already folded in, so nothing doubles up
+    let silent = null;
+
+    // Chrome only ends a session after its own long pause, which felt far too
+    // slow. Stopping after a short silence makes it answer when you finish.
+    const resetSilenceTimer = () => {
+      clearTimeout(silent);
+      silent = setTimeout(() => {
+        try { recognition.stop(); } catch { /* already stopped */ }
+      }, 1500);
+    };
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      // results is cumulative and each event restarts at resultIndex, so only
+      // genuinely new entries are read. Re-reading old ones duplicated words.
+      for (let i = Math.max(event.resultIndex, consumed); i < event.results.length; i++) {
+        const chunk = event.results[i][0].transcript;
+        if (event.results[i].isFinal) finalText += chunk;
+        else interim += chunk;
+      }
+      consumed = event.results.length;
+
+      const live = (finalText + interim).trim();
+      setHeard(live);
+      setInput(live);
+      resetSilenceTimer();
+    };
+
+    recognition.onerror = (event) => {
+      listeningRef.current = false;
+      setListening(false);
+      clearTimeout(silent);
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        onToast("Microphone is blocked. Allow it in your browser settings, then tap the mic again.");
+      } else if (event.error === "no-speech") {
+        onToast("I did not catch any words. Tap the mic and speak straight after.");
+      } else if (event.error === "network") {
+        onToast("Voice recognition needs a connection. Check you are online and try again.");
+      } else if (event.error !== "aborted") {
+        onToast("Voice input did not work in this browser. You can type instead.");
+      }
+    };
+
+    // Chrome ends the session on its own after a pause. Rather than throwing
+    // the sentence away, submit whatever was heard.
+    recognition.onend = () => {
+      listeningRef.current = false;
+      setListening(false);
+      clearTimeout(silent);
+      const said = finalText.trim();
+      finalText = "";
+      consumed = 0;
+      if (said) {
+        setHeard("");
+        setInput("");
+        send(said);
+      }
+    };
+
+    return recognition;
+  }
+
+  function startListening() {
+    if (listeningRef.current) { stopListening(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      onToast("This browser cannot listen. Try Chrome or Edge, or just type instead.");
+      return;
+    }
+
+    // The microphone must not be listening to Jarvis answering.
+    stopSpeaking();
+    // If the greeting was still waiting to speak, drop it rather than have it
+    // talk over the question.
+    pendingGreetingRef.current = null;
+    setPendingGreeting(null);
+
+    setIsOpen(true);
+    setGreeting(null);
+    setHeard("");
+
+    try {
+      const recognition = buildRecognition(SR);
+      recognitionRef.current = recognition;
+      listeningRef.current = true;
+      recognition.start();
+      setListening(true);
+    } catch (err) {
+      listeningRef.current = false;
+      setListening(false);
+      onToast("I could not open the microphone. Check the browser permission.");
+    }
+  }
+
+  function stopListening() {
+    listeningRef.current = false;
+    setListening(false);
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // Already stopped, nothing to do.
+    }
+  }
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -2228,9 +2425,19 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
 
   async function send(text) {
     const message = (text ?? input).trim();
-    if (!message || busy) return;
+    if (!message) return;
+
+    // A spoken question used to be thrown away whenever a reply was already
+    // being fetched, so the microphone appeared to do nothing. Queue instead.
+    if (busyRef.current) {
+      queueRef.current.push(message);
+      return;
+    }
+
     setMessages(prev => [...prev, { role: "user", blocks: { text: message } }]);
     setInput("");
+    setHeard("");
+    busyRef.current = true;
     setBusy(true);
     try {
       const reply = await api("/api/jarvis/ask", {
@@ -2246,22 +2453,11 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
         blocks: { text: e.message, list: ["Please try that again."] },
       }]);
     } finally {
+      busyRef.current = false;
       setBusy(false);
-    }
-  }
-
-  function startListening() {
-    if (!recognitionRef.current || listening) return;
-    // Speaking and listening at the same time stops recognition from hearing
-    // anything, because the microphone picks up the assistant's own voice.
-    stopSpeaking();
-    setIsOpen(true);
-    try {
-      recognitionRef.current.start();
-      setListening(true);
-    } catch (err) {
-      setListening(false);
-      onToast("I could not open the microphone. Check the browser permission.");
+      // Anything spoken while we were busy gets asked now.
+      const queued = queueRef.current.shift();
+      if (queued) setTimeout(() => send(queued), 120);
     }
   }
 
@@ -2384,7 +2580,7 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
                   <button
                     className={`jarvis-mic ${listening ? "on" : ""}`}
                     onClick={startListening}
-                    title="Speak instead of typing"
+                    title={listening ? "Stop listening" : "Speak your question"}
                   >
                     {listening ? <Square size={15} /> : <Mic size={15} />}
                   </button>
@@ -2401,6 +2597,15 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
                 <button className="close-btn" onClick={() => setIsOpen(false)}><X size={17} /></button>
               </div>
             </div>
+
+            {listening && (
+              <div className="jarvis-hearing">
+                <span className="jarvis-hearing-dot" />
+                <span className="jarvis-hearing-text">
+                  {heard ? `Heard: "${heard}"` : "Listening, speak now..."}
+                </span>
+              </div>
+            )}
 
             <div className="jarvis-log" ref={scrollRef}>
               {messages.map((m, i) => (
@@ -2429,16 +2634,26 @@ function JarvisPanel({ onToast, onAuthLoss, setActiveView, data, openAssign, edi
 
             <form
               className="jarvis-input"
-              onSubmit={e => { e.preventDefault(); send(); }}
+              onSubmit={e => {
+                e.preventDefault();
+                stopListening();
+                send();
+              }}
             >
               <input
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                placeholder={listening ? "Listening..." : "Ask Jarvis, or press the mic to speak"}
-                disabled={busy}
+                placeholder={listening ? "Listening, speak now..." : "Ask Jarvis, or press the mic to speak"}
+                disabled={busy && !input.trim()}
               />
               {speechSupported && (
-                <button type="button" onClick={startListening} className={listening ? "on" : ""} title="Speak">
+                <button
+                  type="button"
+                  onClick={startListening}
+                  className={listening ? "on" : ""}
+                  title={listening ? "Stop listening" : "Speak your question"}
+                  aria-label={listening ? "Stop listening" : "Speak your question"}
+                >
                   {listening ? <Square size={16} /> : <Mic size={16} />}
                 </button>
               )}

@@ -483,8 +483,24 @@ def intent_site_status(ctx):
         f"- {_field(p, 'path')} returned {_field(p, 'status')} in {_field(p, 'ms')}ms"
         for p in (_field(run, "pages") or [])
     ]
+    if status in ("down", "critical"):
+        verdict = (
+            "**ngocore.in is not serving properly.** "
+            f"{_field(run, 'summary') or 'That needs looking at now.'}"
+        )
+    elif status in ("degraded", "warning"):
+        verdict = (
+            f"**ngocore.in is up, but not well.** "
+            f"{_field(run, 'summary') or 'Something is slower or broken on it.'}"
+        )
+    else:
+        verdict = (
+            f"**ngocore.in is up and behaving.** "
+            f"{_field(run, 'summary') or 'Nothing to flag.'}"
+        )
+
     return {
-        "text": f"**ngocore.in is {status}.** {_field(run, 'summary')}",
+        "text": verdict,
         "list": lines,
         "actions": [{"label": "Open Site QA", "action": "goto", "view": "qa"}],
     }
@@ -498,7 +514,10 @@ def intent_site_problems(ctx):
         return {"text": "I have no QA findings recorded. Run a Site QA check first."}
     lines = [f"- [{_field(i, 'severity')}] {_field(i, 'message')}" for i in issues[:10]]
     return {
-        "text": f"The last QA run found {len(issues)} issue(s) on ngocore.in:",
+        "text": (
+            f"I found {len(issues)} {'thing' if len(issues) == 1 else 'things'} "
+            "to fix on ngocore.in:"
+        ),
         "list": lines,
         "actions": [{"label": "Open Site QA", "action": "goto", "view": "qa"}],
     }
@@ -514,15 +533,47 @@ def intent_security(ctx):
         }
     findings = _field(run, "findings") or []
     tls = _field(run, "tls") or {}
+    status = _field(run, "status")
+    critical = _field(run, "critical_count", 0) or 0
+    warning = _field(run, "warning_count", 0) or 0
     lines = [f"- [{_field(f, 'severity')}] {_field(f, 'message')}" for f in findings[:8]]
+
+    # Say it as a verdict rather than a table of column headings.
+    if status == "inconclusive":
+        verdict = (
+            "I could not get a clean read on the site, because the firewall "
+            "blocked the scan. That does not mean there is a problem, it means "
+            "I do not know yet."
+        )
+    elif critical:
+        verdict = (
+            f"I found **{critical} {'problem' if critical == 1 else 'problems'}** "
+            "worth fixing. I would not sleep well until those are done."
+        )
+    elif warning:
+        verdict = (
+            f"Nothing dangerous, but there {'is' if warning == 1 else 'are'} "
+            f"**{warning} warning{'s' if warning != 1 else ''}** worth tidying up."
+        )
+    else:
+        verdict = "Nothing to worry about. It all came back clean."
+
+    extra = []
+    version = tls.get("tls_version")
+    if version:
+        extra.append(f"it is on {version}")
+    days = tls.get("days_left")
+    if isinstance(days, int) and days >= 0:
+        extra.append(
+            "the certificate runs out in under three months"
+            if days < 90
+            else f"the certificate is good for another {days} days"
+        )
+    if extra:
+        verdict += " Worth knowing: " + " and ".join(extra) + "."
+
     return {
-        "text": (
-            f"Latest security review: **{_field(run, 'status')}**. "
-            f"{_field(run, 'critical_count', 0)} critical, "
-            f"{_field(run, 'warning_count', 0)} warnings. "
-            f"TLS {tls.get('tls_version', 'unknown')}, "
-            f"certificate expires in {tls.get('days_left', '?')} days."
-        ),
+        "text": verdict,
         "list": lines,
         "actions": [{"label": "Open Security", "action": "goto", "view": "security"}],
     }

@@ -2595,6 +2595,37 @@ button { cursor: pointer; color: inherit; }
 }
 .jarvis-greeting-mute { margin-left: auto; padding: 7px 9px !important; }
 
+/* Live "I am hearing you" strip. Without this the microphone gave no
+   feedback at all, which read as the mic being broken. */
+.jarvis-hearing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(245, 184, 61, 0.08);
+  border-bottom: 1px solid rgba(245, 184, 61, 0.25);
+  flex-shrink: 0;
+}
+.jarvis-hearing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gold);
+  flex-shrink: 0;
+  animation: hearing-pulse 1s ease-in-out infinite;
+}
+@keyframes hearing-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+.jarvis-hearing-text {
+  font-size: 11px;
+  color: #f5d99a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .jarvis-fab.nudge { animation: jarvis-nudge 2.4s ease-in-out infinite; }
 @keyframes jarvis-nudge {
   0%, 100% { box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55); }
