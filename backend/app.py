@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request, send_from_directory, session
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
+from werkzeug.security import check_password_hash, generate_password_hash
 
 # Sibling modules (emailer) are imported by bare name below. Locally that works
 # because you run from backend/, but serverless hosts set the working directory
@@ -180,9 +181,12 @@ from emailer import (
 # ---------------- Admin Authentication ----------------
 
 def is_admin_auth_enabled():
-    """Auth is only enforced once an ADMIN_PASSWORD is configured, so local
-    development keeps working without any setup."""
-    return bool(os.getenv("ADMIN_PASSWORD", "").strip())
+    """Auth is enforced once a password exists, either as ADMIN_PASSWORD in the
+    environment or one saved from the Security panel. Local development keeps
+    working with neither set."""
+    if os.getenv("ADMIN_PASSWORD", "").strip():
+        return True
+    return bool(AppSetting.query.filter_by(key="admin_password_hash").first())
 
 
 def is_admin_authenticated():
@@ -229,12 +233,77 @@ def serve_frontend(path):
 
 # ---------------- API ENDPOINTS ----------------
 
+def get_stored_admin_hash():
+    """Password hash saved from the Security panel, if the manager set one.
+
+    Takes precedence over ADMIN_PASSWORD once it exists, so changing the
+    password from the UI actually takes effect.
+    """
+    row = AppSetting.query.filter_by(key="admin_password_hash").first()
+    return row.value if row and row.value else ""
+
+
+def admin_password_matches(candidate):
+    """Check a password against the stored hash, falling back to the env var."""
+    if not candidate:
+        return False
+
+    stored = get_stored_admin_hash()
+    if stored:
+        return check_password_hash(stored, candidate)
+
+    expected = os.getenv("ADMIN_PASSWORD", "").strip()
+    if not expected:
+        return False
+    return hmac.compare_digest(candidate, expected)
+
+
 @app.get("/api/auth/status")
 def auth_status():
     """Lets the frontend know whether it should show a sign-in screen."""
     return jsonify({
         "enabled": is_admin_auth_enabled(),
         "authenticated": is_admin_authenticated(),
+        "password_source": "database" if get_stored_admin_hash() else "environment",
+    })
+
+
+@app.post("/api/auth/change-password")
+@require_admin
+def change_admin_password():
+    """Lets the manager rotate their password from the UI.
+
+    Only reachable while already signed in, and only with the current
+    password, so a stolen session alone cannot lock the owner out.
+    """
+    if not is_admin_auth_enabled():
+        return jsonify({"error": "No admin password is configured to change."}), 400
+
+    data = request.get_json(silent=True) or {}
+    current = data.get("current_password") or ""
+    new_password = (data.get("new_password") or "").strip()
+    confirm = data.get("confirm_password")
+
+    if not admin_password_matches(current):
+        return jsonify({"error": "Current password is incorrect."}), 401
+
+    if len(new_password) < 8:
+        return jsonify({"error": "New password must be at least 8 characters."}), 400
+    if confirm is not None and confirm != new_password:
+        return jsonify({"error": "New passwords do not match."}), 400
+    if new_password == current:
+        return jsonify({"error": "New password must be different from the current one."}), 400
+
+    row = AppSetting.query.filter_by(key="admin_password_hash").first()
+    if row:
+        row.value = generate_password_hash(new_password)
+    else:
+        db.session.add(AppSetting(key="admin_password_hash", value=generate_password_hash(new_password)))
+    db.session.commit()
+
+    return jsonify({
+        "ok": True,
+        "message": "Password updated. Use the new password next time you sign in.",
     })
 
 
@@ -245,9 +314,8 @@ def auth_login():
 
     data = request.get_json(silent=True) or {}
     supplied = (data.get("password") or "").strip()
-    expected = os.getenv("ADMIN_PASSWORD", "").strip()
 
-    if not supplied or not hmac.compare_digest(supplied, expected):
+    if not admin_password_matches(supplied):
         return jsonify({"error": "Incorrect password."}), 401
 
     session.permanent = True

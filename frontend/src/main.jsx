@@ -5,7 +5,7 @@ import {
   Clock3, Coffee, LayoutDashboard, Mail, MoreHorizontal,
   Plus, Search, Settings2, Sparkles, Users, X, Zap,
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
-  Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut
+  Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -43,7 +43,9 @@ async function api(path, options = {}) {
 function App() {
   const [data, setData] = useState({ members: [], tasks: [], stats: {}, smtp_status: {} });
   const [loading, setLoading] = useState(true);
-  const [authState, setAuthState] = useState({ checked: false, enabled: false, authenticated: false });
+  const [authState, setAuthState] = useState({
+    checked: false, enabled: false, authenticated: false, passwordSource: "environment",
+  });
   const [activeView, setActiveView] = useState("overview"); // 'overview', 'who_working', 'office', 'completed'
   const [selectedMember, setSelectedMember] = useState("all");
   const [search, setSearch] = useState("");
@@ -52,6 +54,9 @@ function App() {
   const [deletingMember, setDeletingMember] = useState(null);
   const [editingTask, setEditingTask] = useState(null);
   const [portalTask, setPortalTask] = useState(null);
+  const [taskMemberFilter, setTaskMemberFilter] = useState("all");
+  const [taskStatusFilter, setTaskStatusFilter] = useState("all");
+  const [securityOpen, setSecurityOpen] = useState(false);
   const [prefilledMemberId, setPrefilledMemberId] = useState(null);
   const [toast, setToast] = useState("");
   // Read during the first render, not in an effect. Otherwise an employee
@@ -92,12 +97,17 @@ function App() {
         credentials: "same-origin",
       });
       const json = await res.json();
-      setAuthState({ checked: true, enabled: !!json.enabled, authenticated: !!json.authenticated });
+      setAuthState({
+        checked: true,
+        enabled: !!json.enabled,
+        authenticated: !!json.authenticated,
+        passwordSource: json.password_source || "environment",
+      });
 
       // When auth is switched off entirely (local dev), treat as signed in so
       // the sign-in screen never appears for a setup that has no password.
       if (!json.enabled) {
-        setAuthState({ checked: true, enabled: false, authenticated: true });
+        setAuthState(prev => ({ ...prev, checked: true, enabled: false, authenticated: true }));
       }
       return json.authenticated || !json.enabled;
     } catch {
@@ -188,7 +198,7 @@ function App() {
     } catch {
       // Even if the call fails, clear local state so the UI locks.
     }
-    setAuthState({ checked: true, enabled: true, authenticated: false });
+    setAuthState(prev => ({ ...prev, checked: true, enabled: true, authenticated: false }));
     setData({ members: [], tasks: [], stats: {}, smtp_status: {} });
   }
 
@@ -352,6 +362,7 @@ function App() {
         onEditMember={handleOpenEditMember}
         onDeleteMember={setDeletingMember}
         onOpenEmailCenter={() => setModal("email_center")}
+        onOpenSecurity={authState.enabled ? () => setSecurityOpen(true) : null}
         onLogout={authState.enabled ? logout : null}
         smtpStatus={data.smtp_status}
       />
@@ -436,6 +447,13 @@ function App() {
             <Coffee size={16} /> Virtual Animated Office
           </button>
           <button
+            className={`view-tab ${activeView === "tasks" ? "active" : ""}`}
+            onClick={() => setActiveView("tasks")}
+          >
+            <ListChecks size={16} /> All Tasks
+            <span className="tab-badge">{data.tasks.length}</span>
+          </button>
+          <button
             className={`view-tab completed-tab ${activeView === "completed" ? "active" : ""}`}
             onClick={() => setActiveView("completed")}
           >
@@ -443,6 +461,25 @@ function App() {
             <span className="tab-badge">{completedTasks.length}</span>
           </button>
         </div>
+
+        {/* VIEW: ALL TASKS REGISTER */}
+        {activeView === "tasks" && (
+          <AllTasksView
+            tasks={data.tasks}
+            members={data.members}
+            search={search}
+            onSearch={setSearch}
+            memberFilter={taskMemberFilter}
+            onMemberFilter={setTaskMemberFilter}
+            statusFilter={taskStatusFilter}
+            onStatusFilter={setTaskStatusFilter}
+            onEdit={setEditingTask}
+            onDelete={setPortalTask}
+            onAdvance={(t, next) => updateTask(t.id, { status: next })}
+            onCopyPortalLink={copyPortalLink}
+            onResendEmail={resendEmailNotification}
+          />
+        )}
 
         {/* VIEW: COMPLETED TASKS */}
         {activeView === "completed" && (
@@ -810,6 +847,13 @@ function App() {
         />
       )}
 
+      {securityOpen && (
+        <SecurityModal
+          passwordSource={authState.passwordSource}
+          onClose={() => setSecurityOpen(false)}
+        />
+      )}
+
       {modal === "email_center" && (
         <EmailCenterModal
           onClose={() => setModal(null)}
@@ -920,6 +964,7 @@ function Sidebar({
   onEditMember,
   onDeleteMember,
   onOpenEmailCenter,
+  onOpenSecurity,
   onLogout,
   smtpStatus
 }) {
@@ -956,6 +1001,16 @@ function Sidebar({
         onClick={() => setActiveView("office")}
       >
         <Coffee size={18} /> Live Office Scene
+      </button>
+
+      <button
+        className={`nav-item ${activeView === "tasks" ? "active" : ""}`}
+        onClick={() => {
+          setActiveView("tasks");
+          setSelectedMember("all");
+        }}
+      >
+        <ListChecks size={18} /> All Tasks
       </button>
 
       <button
@@ -1025,6 +1080,11 @@ function Sidebar({
         <button className="nav-item" onClick={onOpenEmailCenter}>
           <Settings2 size={18} /> Email & Settings
         </button>
+        {onOpenSecurity && (
+          <button className="nav-item" onClick={onOpenSecurity}>
+            <Shield size={18} /> Security
+          </button>
+        )}
         {onLogout && (
           <button className="nav-item" onClick={onLogout} title="Sign out of the manager dashboard">
             <LogOut size={18} /> Sign Out
@@ -1433,6 +1493,138 @@ function EditTaskModal({ task, members, onClose, onSave, onDelete }) {
   );
 }
 
+function SecurityModal({ passwordSource, onClose }) {
+  const [form, setForm] = useState({
+    current_password: "",
+    new_password: "",
+    confirm_password: "",
+  });
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [errors, setErrors] = useState({});
+
+  const change = e => setForm({ ...form, [e.target.name]: e.target.value });
+
+  async function submit(e) {
+    e.preventDefault();
+    setErrors({});
+
+    if (!form.current_password) {
+      setErrors({ current_password: "Enter your current password." });
+      return;
+    }
+    if (form.new_password.length < 8) {
+      setErrors({ new_password: "Use at least 8 characters." });
+      return;
+    }
+    if (form.new_password !== form.confirm_password) {
+      setErrors({ confirm_password: "Passwords do not match." });
+      return;
+    }
+
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await fetch(`${API}/api/auth/change-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(form),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setResult({ ok: false, message: json.error || "Could not update the password." });
+        return;
+      }
+      setResult({ ok: true, message: json.message });
+      setForm({ current_password: "", new_password: "", confirm_password: "" });
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Security" onClose={onClose}>
+      <form onSubmit={submit} className="form">
+        <div className="security-banner">
+          <Shield size={16} />
+          <div>
+            <strong>Manager password</strong>
+            <p>
+              {passwordSource === "database"
+                ? "Currently using the password you saved on this page."
+                : "Currently using the ADMIN_PASSWORD environment variable. Saving a password here takes over from it."}
+            </p>
+          </div>
+        </div>
+
+        <label>
+          Current password
+          <div className="password-input">
+            <input
+              type={show ? "text" : "password"}
+              name="current_password"
+              value={form.current_password}
+              onChange={change}
+              required
+              placeholder="Your current password"
+            />
+            <button type="button" onClick={() => setShow(!show)}>
+              <Eye size={15} />
+            </button>
+          </div>
+          {errors.current_password && <span className="field-error">{errors.current_password}</span>}
+        </label>
+
+        <label>
+          New password
+          <input
+            type={show ? "text" : "password"}
+            name="new_password"
+            value={form.new_password}
+            onChange={change}
+            required
+            minLength={8}
+            placeholder="At least 8 characters"
+          />
+          {errors.new_password && <span className="field-error">{errors.new_password}</span>}
+        </label>
+
+        <label>
+          Confirm new password
+          <input
+            type={show ? "text" : "password"}
+            name="confirm_password"
+            value={form.confirm_password}
+            onChange={change}
+            required
+            placeholder="Repeat the new password"
+          />
+          {errors.confirm_password && <span className="field-error">{errors.confirm_password}</span>}
+        </label>
+
+        {result && (
+          <div className={`test-feedback ${result.ok ? "success" : "error"}`}>
+            {result.ok ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+            <span>{result.message}</span>
+          </div>
+        )}
+
+        <button className="primary-btn full" type="submit" disabled={busy}>
+          <Shield size={16} /> {busy ? "Updating..." : "Update Password"}
+        </button>
+
+        <p className="login-hint">
+          Team members do not use this password. Their access is through their own portal link.
+        </p>
+      </form>
+    </Modal>
+  );
+}
+
 function DeleteTaskModal({ task, onClose, onConfirm }) {
   return (
     <Modal title="Delete Task" onClose={onClose}>
@@ -1453,6 +1645,216 @@ function DeleteTaskModal({ task, onClose, onConfirm }) {
         </button>
       </div>
     </Modal>
+  );
+}
+
+const STATUS_META = {
+  todo: { label: "Yet to Start", short: "To Do" },
+  in_progress: { label: "In Progress", short: "Doing" },
+  review: { label: "In Review", short: "Review" },
+  done: { label: "Completed", short: "Done" },
+};
+
+function AllTasksView({
+  tasks, members, search, onSearch,
+  memberFilter, onMemberFilter, statusFilter, onStatusFilter,
+  onEdit, onDelete, onAdvance, onCopyPortalLink, onResendEmail
+}) {
+  const [sortKey, setSortKey] = useState("created_desc");
+  const [sortAsc, setSortAsc] = useState(false);
+
+  const filtered = useMemo(() => {
+    const out = tasks.filter(t => {
+      const okMember = memberFilter === "all" || String(t.member_id) === String(memberFilter);
+      const okStatus = statusFilter === "all" || t.status === statusFilter;
+      const okSearch = !search || `${t.title} ${t.description} ${t.member_name} ${t.notes || ""}`
+        .toLowerCase().includes(search.toLowerCase());
+      return okMember && okStatus && okSearch;
+    });
+
+    const dir = sortAsc ? 1 : -1;
+    const byDue = (a, b) => {
+      if (!a.due_date && !b.due_date) return 0;
+      if (!a.due_date) return 1;   // undated last regardless of direction
+      if (!b.due_date) return -1;
+      return a.due_date.localeCompare(b.due_date) * dir;
+    };
+    const comparators = {
+      created_desc: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) * dir,
+      due_asc: byDue,
+      member: (a, b) => (a.member_name || "").localeCompare(b.member_name || "") * dir,
+      status: (a, b) => (a.status || "").localeCompare(b.status || "") * dir,
+      priority: (a, b) => {
+        const rank = { urgent: 4, high: 3, medium: 2, low: 1 };
+        return ((rank[a.priority] || 0) - (rank[b.priority] || 0)) * dir;
+      },
+    };
+    return [...out].sort(comparators[sortKey] || comparators.created_desc);
+  }, [tasks, memberFilter, statusFilter, search, sortKey, sortAsc]);
+
+  function header(label, key) {
+    return (
+      <th
+        className={`sortable ${sortKey === key ? "sorted" : ""}`}
+        onClick={() => {
+          if (sortKey === key) setSortAsc(!sortAsc);
+          else { setSortKey(key); setSortAsc(true); }
+        }}
+      >
+        {label}
+        <span className="sort-arrow">{sortKey === key ? (sortAsc ? "▲" : "▼") : ""}</span>
+      </th>
+    );
+  }
+
+  return (
+    <section className="all-tasks-view">
+      <div className="section-head">
+        <div>
+          <div className="eyebrow">TASK REGISTER</div>
+          <h2>All Tasks</h2>
+          <p>Every task in one place. Edits here update the kanban board, the team matrix and the office scene instantly.</p>
+        </div>
+
+        <div className="workspace-actions">
+          <div className="search">
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={e => onSearch(e.target.value)}
+              placeholder="Search title, notes or assignee..."
+            />
+          </div>
+          <select
+            className="table-filter"
+            value={memberFilter}
+            onChange={e => onMemberFilter(e.target.value)}
+          >
+            <option value="all">All members ({tasks.length})</option>
+            {members.map(m => {
+              const n = tasks.filter(t => t.member_id === m.id).length;
+              return <option key={m.id} value={m.id}>{m.avatar} {m.name} ({n})</option>;
+            })}
+          </select>
+          <select
+            className="table-filter"
+            value={statusFilter}
+            onChange={e => onStatusFilter(e.target.value)}
+          >
+            <option value="all">All statuses</option>
+            {Object.entries(STATUS_META).map(([k, v]) => {
+              const n = tasks.filter(t => t.status === k).length;
+              return <option key={k} value={k}>{v.label} ({n})</option>;
+            })}
+          </select>
+        </div>
+      </div>
+
+      <div className="task-table-wrap">
+        <table className="task-table">
+          <thead>
+            <tr>
+              {header("Task", "created_desc")}
+              {header("Assignee", "member")}
+              {header("Status", "status")}
+              {header("Priority", "priority")}
+              {header("Due", "due_asc")}
+              <th>Progress note</th>
+              <th className="actions-col">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan="7" className="table-empty">
+                  <Search size={15} /> No tasks match these filters.
+                </td>
+              </tr>
+            ) : (
+              filtered.map(t => {
+                const next = { todo: "in_progress", in_progress: "review", review: "done" }[t.status];
+                return (
+                  <tr key={t.id} className={`task-row ${t.status}`}>
+                    <td className="cell-title">
+                      <strong>{t.title}</strong>
+                      {t.description && <small>{t.description}</small>}
+                    </td>
+                    <td>
+                      <button
+                        className="table-person"
+                        title="Copy this member's portal link"
+                        onClick={() => onCopyPortalLink(t.member_id)}
+                      >
+                        <span>{t.member_avatar}</span> {t.member_name}
+                      </button>
+                    </td>
+                    <td>
+                      <span className={`status-badge-live ${t.status}`}>
+                        {STATUS_META[t.status]?.label || t.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`priority-tag ${t.priority}`}>{t.priority}</span>
+                    </td>
+                    <td className="cell-due">
+                      {t.due_date || "—"}
+                    </td>
+                    <td className="cell-note">
+                      {t.notes ? <span className="note-preview">{t.notes}</span> : <span className="note-empty">none</span>}
+                    </td>
+                    <td className="actions-col">
+                      <div className="row-actions">
+                        {next && (
+                          <button
+                            className="row-btn"
+                            title={`Move to ${STATUS_META[next].label}`}
+                            onClick={() => onAdvance(t, next)}
+                          >
+                            <ChevronDown size={13} />
+                          </button>
+                        )}
+                        <button
+                          className="row-btn"
+                          title="Edit task"
+                          onClick={() => onEdit(t)}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          className="row-btn"
+                          title="Copy member portal link"
+                          onClick={() => onCopyPortalLink(t.member_id)}
+                        >
+                          <Copy size={13} />
+                        </button>
+                        <button
+                          className="row-btn"
+                          title="Resend assignment email"
+                          onClick={() => onResendEmail(t.id)}
+                        >
+                          <Mail size={13} />
+                        </button>
+                        <button
+                          className="row-btn danger"
+                          title="Delete task"
+                          onClick={() => onDelete(t)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="table-footer">
+        Showing {filtered.length} of {tasks.length} tasks
+      </div>
+    </section>
   );
 }
 
