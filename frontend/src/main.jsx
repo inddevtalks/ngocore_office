@@ -7,7 +7,7 @@ import {
   ExternalLink, Copy, Check, Send, Eye, Shield, Menu,
   Pencil, Trash2, AlertTriangle, UserX, Undo2, UserCog, LogOut, ListChecks,
   ShieldCheck, RefreshCw, GitCompare, Download, ShieldAlert,
-  Bot, Mic, Square, Info, Volume2, VolumeX
+  Bot, Mic, Square, Info, Volume2, VolumeX, Sun, Moon
 } from "lucide-react";
 
 import OfficeScene from "./components/OfficeScene";
@@ -51,7 +51,18 @@ const MORE_SECTIONS = [
   { view: "who_working", label: "Who's Working", icon: <Users size={20} /> },
 ];
 
+// Theme is applied before React mounts, so a reload never flashes the dark
+// palette first. The inline script in index.html sets this on documentElement.
+function getStoredTheme() {
+  try {
+    return localStorage.getItem("office-theme") === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
 function App() {
+  const [theme, setTheme] = useState(getStoredTheme);
   const [data, setData] = useState({ members: [], tasks: [], stats: {}, smtp_status: {} });
   const [loading, setLoading] = useState(true);
   const [authState, setAuthState] = useState({
@@ -72,6 +83,28 @@ function App() {
   const [managerName, setManagerName] = useState("");
   const [managerTimezone, setManagerTimezone] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+
+  // Theme lives on documentElement so plain CSS can react to it, and is saved
+  // so it survives a refresh on every device.
+  useEffect(() => {
+    const root = document.documentElement;
+    // Surfaces animate with `transition: all`. When a colour comes from a
+    // custom property, that transition starts but never advances, which left
+    // cards stuck on the old palette. Switching with transitions suppressed
+    // for one frame repaints everything correctly, and avoids a slow muddy
+    // cross-fade across hundreds of elements anyway.
+    root.classList.add("theme-switch");
+    root.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("office-theme", theme);
+    } catch {
+      // Private browsing refuses writes; the theme still applies for now.
+    }
+    const t = setTimeout(() => root.classList.remove("theme-switch"), 60);
+    return () => clearTimeout(t);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(t => (t === "light" ? "dark" : "light"));
 
   // Tells the stylesheet that the More sheet is up, so the floating Jarvis
   // button and greeting step out of its way instead of overlapping it.
@@ -387,6 +420,8 @@ function App() {
         onOpenSecurity={authState.enabled ? () => setSecurityOpen(true) : null}
         onLogout={authState.enabled ? logout : null}
         smtpStatus={data.smtp_status}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <main className="main">
@@ -411,6 +446,14 @@ function App() {
             >
               <Plus size={14} /> Task
             </button>
+            <button
+              className="email-pill-btn-sm"
+              onClick={toggleTheme}
+              title={theme === "light" ? "Switch to the dark theme" : "Switch to the light theme"}
+              aria-label="Toggle light or dark theme"
+            >
+              {theme === "light" ? <Moon size={15} /> : <Sun size={15} />}
+            </button>
           </div>
         </div>
 
@@ -425,6 +468,15 @@ function App() {
           </div>
 
           <div className="top-actions">
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title={theme === "light" ? "Switch to the dark theme" : "Switch to the light theme"}
+              aria-label="Toggle light or dark theme"
+            >
+              {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+            </button>
+
             <div className="date-pill">
               <CalendarDays size={16} />
               {data.today || "Today"}
@@ -888,6 +940,13 @@ function App() {
             </div>
             <button
               className="more-sheet-email"
+              onClick={toggleTheme}
+            >
+              {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+              {theme === "light" ? "Dark theme" : "Light theme"}
+            </button>
+            <button
+              className="more-sheet-email"
               onClick={() => { setModal("email_center"); setMoreOpen(false); }}
             >
               <Mail size={16} /> Email &amp; Outbox
@@ -1082,7 +1141,9 @@ function Sidebar({
   onOpenEmailCenter,
   onOpenSecurity,
   onLogout,
-  smtpStatus
+  smtpStatus,
+  theme,
+  onToggleTheme,
 }) {
   return (
     <aside className="sidebar">
@@ -1223,6 +1284,15 @@ function Sidebar({
       </button>
 
       <div className="sidebar-bottom">
+        <button
+          className="nav-item"
+          onClick={onToggleTheme}
+          title={theme === "light" ? "Switch to the dark theme" : "Switch to the light theme"}
+          aria-label="Toggle light or dark theme"
+        >
+          {theme === "light" ? <Moon size={18} /> : <Sun size={18} />}
+          {theme === "light" ? "Dark theme" : "Light theme"}
+        </button>
         <button className="nav-item" onClick={onOpenEmailCenter}>
           <Settings2 size={18} /> Email & Settings
         </button>
