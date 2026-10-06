@@ -288,6 +288,7 @@ from emailer import (
     get_smtp_config,
     update_smtp_config,
     send_daily_emails,
+    send_due_date_reminders,
     decrypt_secret,
 )
 
@@ -1106,6 +1107,37 @@ def cron_daily_emails():
 
     result = send_daily_emails()
     return jsonify({"ok": True, "message": "Daily task digest dispatched.", "result": result})
+
+
+@app.get("/api/cron/due-reminders")
+def cron_due_reminders():
+    """
+    6pm IST nudge to anyone with a dated task that is not finished yet.
+
+    Runs from Vercel Cron at 12:30 UTC, which is 18:00 in India all year
+    round because IST has no daylight saving.
+    """
+    expected = os.getenv("CRON_SECRET", "").strip()
+    if expected:
+        provided = request.headers.get("Authorization", "").strip()
+        if provided != f"Bearer {expected}":
+            return jsonify({"error": "Unauthorized."}), 401
+    elif not request.args.get("open"):
+        return jsonify({
+            "error": "CRON_SECRET is not set. Add it as a Vercel environment variable to protect this endpoint."
+        }), 503
+
+    result = send_due_date_reminders()
+    return jsonify({"ok": True, "message": "Due-date reminders dispatched.", "result": result})
+
+
+@app.post("/api/reminders/send-now")
+@require_admin
+def reminders_send_now():
+    """Preview or send the reminders on demand, from the Email Center."""
+    preview = request.args.get("preview") == "1"
+    result = send_due_date_reminders(force=True, dry_run=preview)
+    return jsonify({"ok": True, "preview": preview, "result": result})
 
 
 # ---------------- Site QA Bot Endpoints ----------------

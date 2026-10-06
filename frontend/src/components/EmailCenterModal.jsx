@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import {
   Mail, Send, CheckCircle2, AlertCircle, X, Shield, Key,
-  ExternalLink, Eye, RefreshCw, Sparkles, HelpCircle, Settings, Check
+  ExternalLink, Eye, RefreshCw, Sparkles, HelpCircle, Settings, Check, Clock3
 } from "lucide-react";
 
 export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
@@ -24,6 +24,10 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
   });
   const [configSaving, setConfigSaving] = useState(false);
   const [configResult, setConfigResult] = useState(null);
+  // Due-date reminders run on their own at 6pm IST; these buttons let the
+  // manager preview one or fire it early.
+  const [reminderBusy, setReminderBusy] = useState(false);
+  const [reminderResult, setReminderResult] = useState(null);
 
   async function loadOutbox() {
     try {
@@ -115,6 +119,37 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
       setTestResult({ ok: false, message: err.message });
     } finally {
       setTestSending(false);
+    }
+  }
+
+  async function handleReminders(preview) {
+    try {
+      setReminderBusy(true);
+      setReminderResult(null);
+      const res = await fetch(
+        `/api/reminders/send-now${preview ? "?preview=1" : ""}`,
+        { method: "POST", credentials: "same-origin" }
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        setReminderResult({ ok: false, message: json.error || "Could not run the reminders." });
+        return;
+      }
+      const r = json.result || {};
+      setReminderResult({
+        ok: true,
+        preview: json.preview,
+        message: preview
+          ? `Preview only. ${r.eligible || 0} of ${r.checked_members || 0} people would be reminded today.`
+          : `${r.sent || 0} sent, ${r.simulated || 0} simulated, ${r.failed || 0} failed. ` +
+            `${r.skipped_already_sent || 0} already reminded today.`,
+        sample: r.sample || null,
+      });
+      if (!preview) loadOutbox();
+    } catch (err) {
+      setReminderResult({ ok: false, message: err.message });
+    } finally {
+      setReminderBusy(false);
     }
   }
 
@@ -301,6 +336,58 @@ export default function EmailCenterModal({ onClose, onSmtpUpdated }) {
               <div className={`test-feedback ${testResult.ok ? "success" : "error"}`}>
                 {testResult.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
                 <span>{testResult.message}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Due-date reminders: automatic at 6pm IST, with a manual override. */}
+          <div className="test-email-box reminder-box">
+            <h4><Clock3 size={15} /> 6:00pm IST Due-Date Reminders</h4>
+            <p className="reminder-note">
+              Every day at 6pm IST, anyone with a task that has a due date and is
+              not marked complete gets one email reminding them to update their
+              status in their portal. It stops for them as soon as their dated
+              work is finished or rescheduled.
+            </p>
+            <div className="test-email-form">
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={reminderBusy}
+                onClick={() => handleReminders(true)}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                className="primary-btn sm"
+                disabled={reminderBusy}
+                onClick={() => handleReminders(false)}
+              >
+                {reminderBusy ? "Working..." : "Send now"}
+              </button>
+            </div>
+
+            {reminderResult && (
+              <div className={`test-feedback ${reminderResult.ok ? "success" : "error"}`}>
+                {reminderResult.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                <span>{reminderResult.message}</span>
+              </div>
+            )}
+
+            {reminderResult?.sample && (
+              <div className="reminder-preview">
+                <strong>Would go to {reminderResult.sample.to}</strong>
+                <div className="reminder-preview-subject">{reminderResult.sample.subject}</div>
+                <ul>
+                  {reminderResult.sample.tasks.map((t) => <li key={t}>{t}</li>)}
+                </ul>
+                <div className="reminder-preview-link">{reminderResult.sample.portal_url}</div>
+                <iframe
+                  title="Reminder preview"
+                  className="reminder-preview-frame"
+                  srcDoc={reminderResult.sample.body_html}
+                />
               </div>
             )}
           </div>

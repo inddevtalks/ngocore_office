@@ -1,7 +1,8 @@
 import os
 import json
+import html
 import smtplib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone as dt_timezone
 from email.message import EmailMessage
 from pathlib import Path
 from flask import has_app_context
@@ -539,6 +540,217 @@ def send_daily_emails():
                 summary["simulated"] += 1
 
     return summary
+
+
+# ---------------- Due-date reminders ----------------
+
+# Marker embedded in the subject so a second run on the same day is a no-op.
+# Vercel cron can retry, and a manual "Send now" can be pressed twice.
+REMINDER_MARKER = "[due-reminder]"
+
+
+def _reminder_html(member, tasks, portal_url, today):
+    """A small, readable mail. Kept inline because there is no template engine."""
+    rows = []
+    for t in tasks:
+        if t.due_date < today:
+            when, tone = f"Overdue since {t.due_date.strftime('%d %b')}", "#b3261e"
+        elif t.due_date == today:
+            when, tone = "Due today", "#8a5a00"
+        else:
+            days = (t.due_date - today).days
+            when, tone = f"Due in {days} day{'s' if days != 1 else ''}", "#0f6b41"
+
+        label = {
+            "todo": "Not started",
+            "in_progress": "In progress",
+            "review": "Waiting for sign-off",
+        }.get(t.status, t.status)
+
+        rows.append(f"""
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #e6edf5;">
+            <div style="font-weight:600;color:#16212e;font-size:14px;">{html.escape(t.title)}</div>
+            <div style="color:{tone};font-size:12px;font-weight:600;margin-top:3px;">{when}</div>
+          </td>
+          <td style="padding:10px 0;border-bottom:1px solid #e6edf5;text-align:right;
+                     color:#5c7085;font-size:12px;white-space:nowrap;">{html.escape(label)}</td>
+        </tr>""")
+
+    first = tasks[0].title
+    extra = len(tasks) - 1
+    heading = (
+        f"You have {len(tasks)} task{'s' if len(tasks) != 1 else ''} with a due date "
+        f"that {'have' if len(tasks) != 1 else 'has'} not been marked complete."
+    )
+
+    return f"""<!doctype html>
+<html><body style="margin:0;padding:24px;background:#eef2f7;
+  font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#16212e;">
+  <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;
+       border:1px solid #dbe4ee;overflow:hidden;">
+    <div style="background:linear-gradient(135deg,#d98c04,#f5b83d);padding:18px 24px;">
+      <div style="font-size:11px;letter-spacing:1.6px;font-weight:700;color:#5c3d00;">
+        DAILY REMINDER
+      </div>
+      <div style="font-size:19px;font-weight:700;color:#231604;margin-top:4px;">
+        Please update your task status
+      </div>
+    </div>
+
+    <div style="padding:22px 24px 8px;">
+      <p style="margin:0 0 14px;font-size:14px;color:#2f4256;line-height:1.6;">
+        Hi {html.escape(member.name.split()[0])}, it is {today.strftime('%A %d %B %Y')}.
+        {heading}
+      </p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{''.join(rows)}</table>
+
+      <div style="margin:20px 0 6px;">
+        <a href="{portal_url}"
+           style="display:inline-block;background:#d98c04;color:#ffffff;text-decoration:none;
+                  font-weight:700;font-size:14px;padding:12px 22px;border-radius:9px;">
+          Update my status
+        </a>
+      </div>
+      <p style="margin:10px 0 0;font-size:11px;color:#7d8fa1;word-break:break-all;">
+        If the button does not work, open your portal:<br>{portal_url}
+      </p>
+    </div>
+
+    <div style="padding:14px 24px 18px;border-top:1px solid #eef2f7;color:#8496a8;font-size:11px;">
+      You get this once a day at 6:00pm IST, and only while something with a due date
+      is still open. Finish the work or move the due date and it stops.
+      {f'<br><br>Starting with: {html.escape(first)}{f" and {extra} more." if extra else "."}' if tasks else ""}
+    </div>
+  </div>
+</body></html>"""
+
+
+def send_due_date_reminders(force=False, dry_run=False):
+    """Remind everyone with an unfinished, dated task to update their portal.
+
+    Runs at 6pm IST. A member is only mailed once per day unless force is set,
+    so a retried cron or a double click cannot spam the team. dry_run renders
+    the mail and logs nothing, which is what the Preview button uses.
+    """
+    module = _resolve_module()
+    app, TeamMember, Task, EmailLog = (
+        module.app, module.TeamMember, module.Task, module.EmailLog,
+    )
+
+    cfg = get_smtp_config()
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5000").rstrip("/")
+
+    # Reminders are a 6pm IST affair, so the date is decided in IST rather than
+    # in UTC. Otherwise anyone east of Greenwich gets the wrong day's email.
+    ist = dt_timezone(timedelta(hours=5, minutes=30))
+    today = datetime.utcnow().replace(tzinfo=dt_timezone.utc).astimezone(ist).date()
+
+    summary = {
+        "checked_members": 0, "eligible": 0, "sent": 0, "simulated": 0,
+        "failed": 0, "skipped_already_sent": 0, "date_ist": today.isoformat(),
+        "dry_run": bool(dry_run), "sample": None,
+    }
+
+    with app.app_context():
+        members = TeamMember.query.filter_by(active=True).all()
+        summary["checked_members"] = len(members)
+
+        for member in members:
+            # The whole point: a due date exists and it is not finished.
+            tasks = Task.query.filter(
+                Task.member_id == member.id,
+                Task.status != "done",
+                Task.due_date.isnot(None),
+            ).order_by(Task.due_date.asc()).all()
+
+            if not tasks:
+                continue
+            summary["eligible"] += 1
+
+            subject = (
+                f"{REMINDER_MARKER} Please update your status — "
+                f"{len(tasks)} task{'s' if len(tasks) != 1 else ''} still open"
+            )
+
+            if not force:
+                # Only a send that actually got through counts as "already
+                # reminded". A failed SMTP attempt must stay retryable, or one
+                # blip would silence that person for the whole day.
+                day_start = datetime.combine(today, datetime.min.time()) - timedelta(hours=5, minutes=30)
+                day_end = datetime.combine(today, datetime.max.time()) - timedelta(hours=5, minutes=30)
+                already = EmailLog.query.filter(
+                    EmailLog.to_email == member.email,
+                    EmailLog.subject.like(f"%{REMINDER_MARKER}%"),
+                    EmailLog.status != "failed",
+                    EmailLog.created_at >= day_start,
+                    EmailLog.created_at < day_end,
+                ).count()
+                if already:
+                    summary["skipped_already_sent"] += 1
+                    continue
+
+            portal_url = f"{frontend_url}/?portal={member.id}"
+            body_html = _reminder_html(member, tasks, portal_url, today)
+
+            text_lines = [
+                f"Hi {member.name.split()[0]},", "",
+                f"It is {today.strftime('%A %d %B %Y')}. You have {len(tasks)} task"
+                f"{'s' if len(tasks) != 1 else ''} with a due date that "
+                f"{'have' if len(tasks) != 1 else 'has'} not been marked complete:", "",
+            ]
+            for t in tasks:
+                when = "overdue" if t.due_date < today else (
+                    "due today" if t.due_date == today
+                    else f"due {t.due_date.strftime('%d %b')}"
+                )
+                text_lines.append(f"- {t.title} ({t.status}) — {when}")
+            text_lines += [
+                "", "Update your status here:", portal_url, "",
+                "You get this once a day at 6pm IST, and only while something with a",
+                "due date is still open.", "", "— Office Task Hub",
+            ]
+            body_text = "\n".join(text_lines)
+
+            if dry_run:
+                # Show the manager what would go out, without sending or logging.
+                if summary["sample"] is None:
+                    summary["sample"] = {
+                        "to": member.email,
+                        "subject": subject,
+                        "tasks": [t.title for t in tasks],
+                        "portal_url": portal_url,
+                        "body_html": body_html,
+                    }
+                summary["simulated"] += 1
+                continue
+
+            if not cfg["is_configured"]:
+                log_email(member.email, subject, body_text, body_html,
+                          "simulated", error="SMTP not configured")
+                summary["simulated"] += 1
+                continue
+
+            try:
+                msg = EmailMessage()
+                msg["Subject"] = subject
+                msg["From"] = cfg["from_email"]
+                msg["To"] = member.email
+                msg.set_content(body_text)
+                msg.add_alternative(body_html, subtype="html")
+                with smtplib.SMTP(cfg["host"], cfg["port"], timeout=12) as s:
+                    s.starttls()
+                    s.login(cfg["username"], cfg["password"])
+                    s.send_message(msg)
+                log_email(member.email, subject, body_text, body_html, "sent")
+                summary["sent"] += 1
+            except Exception as e:
+                log_email(member.email, subject, body_text, body_html,
+                          "failed", error=str(e))
+                summary["failed"] += 1
+
+    return summary
+
 
 if __name__ == "__main__":
     send_daily_emails()

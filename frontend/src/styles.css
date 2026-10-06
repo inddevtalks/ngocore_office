@@ -55,50 +55,54 @@
 }
 
 /* ---------------- LIGHT THEME ----------------
-   Soft and low-contrast on purpose, not stark white. The brief was that the
-   dark navy felt heavy, so this uses warm off-whites with a hint of blue
-   rather than pure #fff, and keeps the gold accent. */
+   Light but not white and not grey. Surfaces carry a cool blue tint so the
+   page has some colour, cards stay white for contrast, and the status
+   families use real pastels. The ink steps are deliberately much darker
+   than they were: the first version read as washed-out grey on white. */
 :root[data-theme="light"] {
-  --bg: #eef2f7;
+  --bg: #e9eff8;
   --panel: #ffffff;
-  --panel2: #f7f9fc;
-  --panel3: #eef3f9;
-  --line: #d3dde8;
-  --line-strong: #b9c7d6;
-  --text: #16212e;
-  --muted: #5c7085;
-  --muted-dark: #8496a8;
-  --gold: #d98c04;
-  --gold-glow: rgba(217, 140, 4, 0.18);
-  --cyan: #0d8f8a;
-  --cyan-glow: rgba(13, 143, 138, 0.16);
-  --green: #12855a;
-  --green-glow: rgba(18, 133, 90, 0.16);
-  --red: #c8323f;
-  --purple: #6d4bd0;
+  --panel2: #f4f8fd;
+  --panel3: #edf3fb;
+  --line: #cdd9e8;
+  --line-strong: #aebfd3;
+  --text: #101c2b;
+  --muted: #44586e;
+  --muted-dark: #62778d;
+  --gold: #c97d02;
+  --gold-glow: rgba(201, 125, 2, 0.2);
+  --cyan: #0b8a86;
+  --cyan-glow: rgba(11, 138, 134, 0.18);
+  --green: #0f7a52;
+  --green-glow: rgba(15, 122, 82, 0.18);
+  --red: #c02a37;
+  --purple: #6437c9;
 
-  --sf1: #f4f7fb;
+  --sf1: #f1f6fc;
   --sf2: #ffffff;
-  --sf3: #f6f9fc;
-  --sf4: #eaf0f7;
-  --sf5: #dde7f2;
-  --sfLine1: #dde5ee;
-  --sfLine2: #c3d0de;
+  --sf3: #f5f9fe;
+  --sf4: #e6eff9;
+  --sf5: #d8e6f5;
+  --sfLine1: #d6e1ee;
+  --sfLine2: #b3c4d8;
 
-  --stRed: #fdecee;
-  --stAmber: #fdf3e2;
-  --stGold: #fdf3e2;
-  --stGreen: #e6f6ee;
-  --stCyan: #e4f5f5;
-  --stRedLine: #f0b7bd;
-  --stAmberLine: #e6cd97;
-  --stGreenLine: #a5d8c1;
-  --stCyanLine: #a2d5d6;
+  /* Pastels, not white: this is where the light theme gets its colour. */
+  --stRed: #fde7ea;
+  --stAmber: #fdf0d8;
+  --stGold: #fdf0d8;
+  --stGreen: #e0f5ea;
+  --stCyan: #ddf3f3;
+  --stRedLine: #efa9b0;
+  --stAmberLine: #e6c37e;
+  --stGreenLine: #8fd4b1;
+  --stCyanLine: #8acfd1;
 
-  --ink1: #16212e;
-  --ink2: #3b4c5f;
-  --ink3: #5c7085;
-  --ink4: #7d8fa1;
+  /* Dark enough to actually read on white. ink4 is the smallest, faintest
+     text in the UI, so it is held at 4.6:1 against white rather than fading. */
+  --ink1: #101c2b;
+  --ink2: #2b3d52;
+  --ink3: #44586e;
+  --ink4: #566a80;
   --redInk: #b3261e;
   --amberInk: #8a5a00;
   --greenInk: #0f6b41;
@@ -109,19 +113,22 @@
    need saying explicitly rather than through a variable. */
 :root[data-theme="light"] body { background: var(--bg); }
 :root[data-theme="light"] .app-shell {
-  background: radial-gradient(circle at 75% 0%, #dfe9f4 0, transparent 38%), var(--bg);
+  background:
+    radial-gradient(circle at 78% -4%, #d7e6fa 0, transparent 42%),
+    radial-gradient(circle at 8% 104%, #e2eefb 0, transparent 40%),
+    var(--bg);
 }
 :root[data-theme="light"] .sidebar {
-  background: #f7fafd;
+  background: linear-gradient(180deg, #f4f9ff 0, #eaf2fc 100%);
   box-shadow: 1px 0 0 var(--line);
 }
 :root[data-theme="light"] .topbar,
 :root[data-theme="light"] .mobile-header {
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.9);
 }
 :root[data-theme="light"] .mobile-bottom-nav {
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 -6px 24px rgba(20, 40, 70, 0.08);
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 -6px 24px rgba(20, 40, 70, 0.09);
 }
 :root[data-theme="light"] .jarvis-overlay,
 :root[data-theme="light"] .more-sheet-backdrop,
@@ -136,7 +143,7 @@
   box-shadow: 0 10px 30px rgba(20, 40, 70, 0.14);
 }
 :root[data-theme="light"] .jarvis-msg.user .jarvis-bubble {
-  background: #e4edf7;
+  background: #e3edf9;
   color: var(--ink1);
   border-color: var(--sfLine1);
 }
@@ -151,6 +158,128 @@
 :root[data-theme="light"] textarea::placeholder { color: var(--muted-dark); }
 :root[data-theme="light"] .office-hover-card { box-shadow: 0 18px 46px rgba(20, 40, 70, 0.18); }
 :root[data-theme="light"] .toast { box-shadow: 0 12px 34px rgba(20, 40, 70, 0.18); }
+
+/* A little colour in the light theme. Each metric gets its own pastel wash so
+   the row reads as four distinct things rather than four identical boxes. */
+:root[data-theme="light"] .metric-card { border-color: var(--sfLine1); }
+:root[data-theme="light"] .metrics .metric-card:nth-child(1) { background: #eef4ff; border-color: #c3d7f7; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(2) { background: #fdf1dd; border-color: #efd5a4; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(3) { background: #e3f5ee; border-color: #b3e0cd; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(4) { background: #fde9ec; border-color: #f2c2c9; }
+
+:root[data-theme="light"] .metric-icon { background: rgba(255, 255, 255, 0.75); }
+:root[data-theme="light"] .metrics .metric-card:nth-child(1) .metric-icon { color: #2b62c4; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(2) .metric-icon { color: #b3700a; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(3) .metric-icon { color: #10714f; }
+:root[data-theme="light"] .metrics .metric-card:nth-child(4) .metric-icon { color: #c02a37; }
+
+:root[data-theme="light"] .metric-card strong { color: var(--ink1); }
+:root[data-theme="light"] .metric-card span { color: var(--ink3); }
+:root[data-theme="light"] .metric-card small { color: var(--ink4); }
+
+/* Headings carry the colour instead of the greys. The brand gold is too light
+   to read as 11px text on white, so small gold text uses the darker amber. */
+:root[data-theme="light"] .eyebrow { color: var(--amberInk); }
+:root[data-theme="light"] .topbar h1,
+:root[data-theme="light"] .who-header h2,
+:root[data-theme="light"] .section-head h2,
+:root[data-theme="light"] h2 { color: var(--ink1); }
+:root[data-theme="light"] .topbar p,
+:root[data-theme="light"] .section-head p { color: var(--ink3); }
+
+/* Sidebar reads as its own column rather than plain white-on-white. */
+:root[data-theme="light"] .nav-item { color: var(--ink3); }
+:root[data-theme="light"] .nav-item:hover { background: var(--sf4); color: var(--ink1); }
+:root[data-theme="light"] .nav-item.active { background: var(--sf5); color: var(--ink1); }
+:root[data-theme="light"] .side-label { color: var(--ink3); }
+:root[data-theme="light"] .mini-member b { color: var(--ink1); }
+:root[data-theme="light"] .mini-member small { color: var(--ink3); }
+:root[data-theme="light"] .view-tab { color: var(--ink3); }
+:root[data-theme="light"] .view-tab.active { color: var(--ink1); }
+:root[data-theme="light"] .mobile-bottom-nav { border-top-color: var(--line); }
+:root[data-theme="light"] .mob-nav-btn { color: var(--ink3); }
+:root[data-theme="light"] .mob-nav-btn.active { color: var(--gold); }
+:root[data-theme="light"] .mob-nav-action-btn { color: #ffffff; }
+
+/* Status chips keep their identity on light. */
+:root[data-theme="light"] .status-pill,
+:root[data-theme="light"] .status-chip,
+:root[data-theme="light"] .priority-tag,
+:root[data-theme="light"] .qa-status-pill,
+:root[data-theme="light"] .status-badge-live,
+:root[data-theme="light"] .status-badge-email { color: var(--ink1); }
+:root[data-theme="light"] footer { color: var(--ink3); }
+:root[data-theme="light"] .field-hint { color: var(--ink3); }
+:root[data-theme="light"] .reminder-preview-link { color: var(--ink3); }
+:root[data-theme="light"] .jarvis-greeting-clock { color: var(--ink3); }
+
+/* ---------------- MEMBER PORTAL IN LIGHT ----------------
+   The portal is opened straight from a bookmark, often on a phone, so it
+   gets the same colour treatment as the dashboard rather than a bare
+   white page. */
+:root[data-theme="light"] .member-portal-shell {
+  background:
+    radial-gradient(circle at 50% -6%, #dbe8fa 0, transparent 46%),
+    radial-gradient(circle at 92% 8%, #e6f2fb 0, transparent 38%),
+    var(--bg);
+}
+:root[data-theme="light"] .portal-topbar {
+  border-bottom-color: var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--sfLine1);
+  backdrop-filter: blur(6px);
+}
+:root[data-theme="light"] .portal-hero {
+  background: linear-gradient(135deg, #ffffff 0%, #eef5fe 60%, #e6f0fc 100%);
+  border-color: #c4d6ee;
+  box-shadow: 0 14px 34px rgba(24, 52, 88, 0.1);
+}
+:root[data-theme="light"] .portal-brand strong { color: var(--ink1); }
+:root[data-theme="light"] .portal-brand span { color: var(--ink4); }
+:root[data-theme="light"] .portal-profile h1 { color: var(--ink1); }
+:root[data-theme="light"] .profile-role { color: var(--ink3); }
+:root[data-theme="light"] .greeting-pill {
+  color: #a86500;
+  background: #fdf0d8;
+  border: 1px solid #eacb96;
+  border-radius: 20px;
+  padding: 4px 10px;
+  display: inline-block;
+}
+:root[data-theme="light"] .p-stat {
+  background: #ffffff;
+  border-color: var(--sfLine1);
+  box-shadow: 0 2px 8px rgba(24, 52, 88, 0.05);
+}
+:root[data-theme="light"] .p-stat.highlight {
+  background: #ddf3f3;
+  border-color: #8acfd1;
+  box-shadow: 0 3px 12px rgba(11, 138, 134, 0.12);
+}
+:root[data-theme="light"] .p-stat.success { background: #e0f5ea; border-color: #8fd4b1; }
+:root[data-theme="light"] .p-stat.highlight .p-stat-val { color: #0b6a70; }
+:root[data-theme="light"] .p-stat.success .p-stat-val { color: #0f6b41; }
+:root[data-theme="light"] .p-stat-val { color: var(--ink1); }
+:root[data-theme="light"] .p-stat-lbl { color: var(--ink3); }
+:root[data-theme="light"] .portal-task-card {
+  background: #ffffff;
+  border-color: var(--sfLine1);
+  box-shadow: 0 2px 10px rgba(24, 52, 88, 0.06);
+}
+:root[data-theme="light"] .portal-task-card h3,
+:root[data-theme="light"] .portal-task-card .task-title { color: var(--ink1); }
+:root[data-theme="light"] .portal-manager-bar {
+  background: var(--stAmber);
+  border-color: var(--stAmberLine);
+  color: #6d4700;
+}
+:root[data-theme="light"] .portal-filter-bar .filter-tab { color: var(--ink3); }
+:root[data-theme="light"] .portal-filter-bar .filter-tab.active {
+  background: var(--sf5);
+  color: var(--ink1);
+}
 
 * { box-sizing: border-box; }
 body {
@@ -3088,6 +3217,40 @@ button { cursor: pointer; color:inherit; }
   font: 11.5px/1.7 "Space Grotesk", system-ui, sans-serif;
   color:var(--ink1); white-space: pre-wrap;
   margin: 0; word-break: break-word;
+}
+
+/* Due-date reminder controls in the Email Center */
+.reminder-box { border-color: var(--stAmberLine); background: var(--stAmber); }
+.reminder-box h4 { color: var(--amberInk); }
+.reminder-note {
+  margin: 4px 0 12px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink3);
+}
+.reminder-preview {
+  margin-top: 12px;
+  border: 1px solid var(--sfLine2);
+  border-radius: 10px;
+  background: var(--sf3);
+  padding: 12px;
+}
+.reminder-preview strong { font-size: 12px; color: var(--ink1); }
+.reminder-preview-subject {
+  margin: 6px 0 8px;
+  font-size: 11px;
+  color: var(--ink2);
+  font-weight: 600;
+}
+.reminder-preview ul { margin: 0 0 8px; padding-left: 18px; color: var(--ink3); font-size: 11px; }
+.reminder-preview-link { font-size: 10px; color: var(--ink4); word-break: break-all; }
+.reminder-preview-frame {
+  width: 100%;
+  height: 320px;
+  margin-top: 10px;
+  border: 1px solid var(--sfLine2);
+  border-radius: 8px;
+  background: #fff;
 }
 
 /* ---------------- MOBILE MORE SHEET ---------------- */

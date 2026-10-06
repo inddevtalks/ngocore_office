@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import {
   CheckCircle2, Clock, PlayCircle, AlertCircle, ArrowLeft, Copy, Check,
-  Sparkles, FileText, Send, Zap, ChevronRight, MessageSquare, Calendar
+  Sparkles, FileText, Send, Zap, ChevronRight, MessageSquare, Calendar,
+  Sun, Moon
 } from "lucide-react";
 
 export default function MemberPortal({ memberId, onBackToManager, previewMode = false }) {
@@ -13,6 +14,31 @@ export default function MemberPortal({ memberId, onBackToManager, previewMode = 
   const [savingTaskId, setSavingTaskId] = useState(null);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState("");
+
+  // Same theme handling as the dashboard, kept local so the portal works on
+  // its own from a bookmarked link with no manager session.
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem("office-theme") === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("theme-switch");
+    root.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("office-theme", theme);
+    } catch {
+      // Private browsing refuses writes; it still applies for this visit.
+    }
+    const t = setTimeout(() => root.classList.remove("theme-switch"), 60);
+    return () => clearTimeout(t);
+  }, [theme]);
+
+  const onToggleTheme = () => setTheme(t => (t === "light" ? "dark" : "light"));
 
   async function loadPortal() {
     try {
@@ -155,6 +181,16 @@ export default function MemberPortal({ memberId, onBackToManager, previewMode = 
         </div>
 
         <div className="portal-top-actions">
+          {/* Employees get the same light/dark choice as the manager, saved on
+              this device. */}
+          <button
+            className="theme-toggle"
+            onClick={onToggleTheme}
+            title={theme === "light" ? "Switch to the dark theme" : "Switch to the light theme"}
+            aria-label="Toggle light or dark theme"
+          >
+            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
           <button className="secondary-btn copy-btn" onClick={copyMyLink}>
             {copied ? <Check size={16} /> : <Copy size={16} />}
             {copied ? "Link Copied" : "Bookmark / Copy Link"}
